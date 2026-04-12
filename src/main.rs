@@ -842,18 +842,6 @@ fn set_volume(level: u16) -> bool {
 
 #[cfg(target_os = "windows")]
 fn set_mute(mute: bool) -> bool {
-    // Use NirCmd or PowerShell — simpler approach with nircmd if available, else PowerShell
-    let action = if mute { "1" } else { "0" };
-    let ps = format!(r#"
-        $obj = New-Object -ComObject WScript.Shell
-        {}
-    "#, if mute {
-        // Toggle approach: send volume mute key
-        "$obj.SendKeys([char]173)"
-    } else {
-        "$obj.SendKeys([char]173)"
-    });
-    // Simpler: use powershell to set mute via COM audio
     let ps = format!(r#"
         Add-Type -TypeDefinition @'
         using System.Runtime.InteropServices;

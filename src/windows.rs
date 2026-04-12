@@ -5,9 +5,9 @@ use std::time::Duration;
 
 // Win32 API imports — the `windows` crate provides safe-ish Rust bindings to Win32.
 // Each feature must be explicitly enabled in Cargo.toml.
-use windows::Win32::Devices::Display::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
+use winapi::um::wingdi::SetDeviceGammaRamp;
 
 // =========================================================================
 // Built-in display — WMI (Windows Management Instrumentation) via PowerShell.
@@ -136,7 +136,7 @@ fn set_gamma_for_hmonitor(hmonitor: HMONITOR, brightness: u32) {
                     ramp[256 + i] = val; // green
                     ramp[512 + i] = val; // blue
                 }
-                let _ = SetDeviceGammaRamp(hdc, ramp.as_ptr() as *const _);
+                let _ = SetDeviceGammaRamp(hdc.0 as winapi::shared::windef::HDC, ramp.as_ptr() as *mut _);
                 let _ = DeleteDC(hdc); // clean up the device context
             }
         }
