@@ -348,6 +348,18 @@ fn cmd_serve<P: Platform>(port: u16) {
         let url_decode = |s: &str| s.replace("%20", " ").replace("+", " ");
 
         let json = match cmd {
+            "" => serde_json::to_string(&serde_json::json!({
+                "name": "display-dj",
+                "version": env!("CARGO_PKG_VERSION"),
+                "routes": [
+                    "/list", "/get_all", "/get_one/<id>",
+                    "/set_all/<level>", "/set_all/<level>/<mode>",
+                    "/set_one/<id>/<level>", "/set_one/<id>/<level>/<mode>",
+                    "/dark", "/light", "/theme",
+                    "/get_volume", "/set_volume/<level>", "/mute", "/unmute",
+                    "/reset", "/health"
+                ]
+            })).unwrap(),
             "health" => r#"{"status":"ok"}"#.to_string(),
             "list" => serve_list::<P>(),
             "get_all" => serve_get::<P>(None),
