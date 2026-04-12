@@ -51,7 +51,7 @@ fn find_backlight() -> Option<BacklightInfo> {
     // .flatten() skips any DirEntry errors.
     for entry in fs::read_dir("/sys/class/backlight").ok()?.flatten() {
         let max_path = entry.path().join("max_brightness");
-        if let Ok(max) = fs::read_to_string(&max_path).ok()
+        if let Some(max) = fs::read_to_string(&max_path).ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
         {
             if max > 0 {
