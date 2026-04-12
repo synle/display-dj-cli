@@ -1,0 +1,150 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.2.0). Leave empty to use Cargo.toml version.'
+        required: false
+        type: string
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Releasing version: ${VERSION} (tag: v${VERSION})"
+
+  build:
+    needs: prepare
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: display-dj-macos-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: display-dj-macos-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: display-dj-windows-x64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: display-dj-linux-x64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: display-dj-linux-arm64
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact: display-dj-windows-arm64
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.artifact }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Run tests
+        if: matrix.target != 'aarch64-pc-windows-msvc'
+        run: cargo test --target ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare artifact (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cp target/${{ matrix.target }}/release/display-dj ${{ matrix.artifact }}
+          chmod +x ${{ matrix.artifact }}
+
+      - name: Prepare artifact (Windows)
+        if: runner.os == 'Windows'
+        run: cp target/${{ matrix.target }}/release/display-dj.exe ${{ matrix.artifact }}.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}*
+
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: display-dj ${{ needs.prepare.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            artifacts/display-dj-macos-arm64/display-dj-macos-arm64
+            artifacts/display-dj-macos-x64/display-dj-macos-x64
+            artifacts/display-dj-windows-x64/display-dj-windows-x64.exe
+            artifacts/display-dj-windows-arm64/display-dj-windows-arm64.exe
+            artifacts/display-dj-linux-x64/display-dj-linux-x64
+            artifacts/display-dj-linux-arm64/display-dj-linux-arm64
+          body: |
+            ## Install
+
+            Download the binary for your platform, make it executable, and move to your PATH:
+
+            ```bash
+            # macOS (Apple Silicon)
+            chmod +x display-dj-macos-arm64 && mv display-dj-macos-arm64 /usr/local/bin/display-dj
+
+            # macOS (Intel)
+            chmod +x display-dj-macos-x64 && mv display-dj-macos-x64 /usr/local/bin/display-dj
+
+            # Linux
+            chmod +x display-dj-linux-x64 && sudo mv display-dj-linux-x64 /usr/local/bin/display-dj
+
+            # Windows: move display-dj-windows-x64.exe somewhere in your PATH
+            ```
+
+            ## Quick start
+
+            ```bash
+            display-dj list              # see your displays
+            display-dj set_all 50        # set all to 50%
+            display-dj serve             # start HTTP server on port 51337
+            ```
+
+            See [README](https://github.com/${{ github.repository }}/blob/main/README.md) for full docs.

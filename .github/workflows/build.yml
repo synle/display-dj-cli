@@ -1,0 +1,71 @@
+name: Build Release Binaries
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: display-dj-macos-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: display-dj-macos-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: display-dj-windows-x64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: display-dj-linux-x64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: display-dj-linux-arm64
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact: display-dj-windows-arm64
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.artifact }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Run tests
+        if: matrix.target != 'aarch64-pc-windows-msvc'
+        run: cargo test --target ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare artifact (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cp target/${{ matrix.target }}/release/display-dj ${{ matrix.artifact }}
+          chmod +x ${{ matrix.artifact }}
+
+      - name: Prepare artifact (Windows)
+        if: runner.os == 'Windows'
+        run: cp target/${{ matrix.target }}/release/display-dj.exe ${{ matrix.artifact }}.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}*
+          retention-days: 90
