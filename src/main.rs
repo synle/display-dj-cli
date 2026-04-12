@@ -909,4 +909,39 @@ mod tests {
         assert!(json.contains("error"));
         assert!(json.contains("not found"));
     }
+
+    // --- Volume ---
+
+    #[test]
+    fn volume_info_serializes() {
+        let info = VolumeInfo { volume: 75, muted: false };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"volume\":75"));
+        assert!(json.contains("\"muted\":false"));
+    }
+
+    #[test]
+    fn volume_info_muted_serializes() {
+        let info = VolumeInfo { volume: 0, muted: true };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"volume\":0"));
+        assert!(json.contains("\"muted\":true"));
+    }
+
+    #[test]
+    fn serve_get_volume_returns_json() {
+        // get_volume() calls OS APIs — may return None in CI.
+        // Just verify serve_get_volume returns valid JSON either way.
+        let json = serve_get_volume();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("volume").is_some() || parsed.get("error").is_some());
+    }
+
+    #[test]
+    fn serve_set_volume_returns_json() {
+        // set_volume() calls OS APIs — may fail in CI.
+        let json = serve_set_volume(50);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("status").is_some() || parsed.get("error").is_some());
+    }
 }

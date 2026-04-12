@@ -1,6 +1,6 @@
 # display-dj
 
-Cross-platform CLI for controlling monitor brightness using multiple methods.
+Cross-platform CLI for controlling monitor brightness, system volume, and dark mode.
 
 Supports **macOS**, **Windows**, and **Linux** (X11 + Wayland).
 
@@ -44,6 +44,10 @@ display-dj reset                        # Reset gamma to defaults
 display-dj dark                         # Switch to dark mode
 display-dj light                        # Switch to light mode
 display-dj theme                        # Get current theme (JSON)
+display-dj get_volume                   # Get volume (JSON)
+display-dj set_volume <level>           # Set volume (0-100)
+display-dj mute                         # Mute audio
+display-dj unmute                       # Unmute audio
 display-dj serve [port]                 # Start HTTP server (default: 51337)
 ```
 
@@ -58,9 +62,12 @@ display-dj set_one "XZ322QU V3" 30      # set by monitor name
 display-dj get_one builtin              # read brightness as JSON
 display-dj reset                        # restore gamma
 display-dj dark                         # switch to dark mode
-display-dj serve                        # start HTTP server on port 51337
-display-dj serve 8080                   # start on custom port
 display-dj theme                        # check current theme
+display-dj get_volume                   # read volume as JSON
+display-dj set_volume 50                # set volume to 50%
+display-dj mute                         # mute
+display-dj unmute                       # unmute
+display-dj serve                        # start HTTP server on port 51337
 ```
 
 ### Modes
@@ -109,6 +116,12 @@ curl localhost:51337/set_one/builtin/60
 curl localhost:51337/dark
 curl localhost:51337/light
 curl localhost:51337/theme
+
+# Volume
+curl localhost:51337/get_volume
+curl localhost:51337/set_volume/50
+curl localhost:51337/mute
+curl localhost:51337/unmute
 
 # Utility
 curl localhost:51337/reset
@@ -161,6 +174,7 @@ curl -s localhost:51337/get_all | jq '.[].brightness'
 | External DDC/CI | `ddc-macos` crate via IOKit I2C (Apple Silicon + Intel) |
 | Gamma (software dimming) | `CGSetDisplayTransferByFormula` (CoreGraphics) |
 | Dark/light mode | `osascript` (System Events) |
+| Volume | `osascript` (`get volume settings` / `set volume output volume`) |
 
 Works on macOS 11+ (Big Sur and later). Apple Silicon and Intel.
 
@@ -174,6 +188,7 @@ Works on macOS 11+ (Big Sur and later). Apple Silicon and Intel.
 | External DDC/CI | `ddc-winapi` crate via Dxva2.dll |
 | Gamma (software dimming) | `SetDeviceGammaRamp` (GDI32) |
 | Dark/light mode | Registry (`AppsUseLightTheme` + `SystemUsesLightTheme`) |
+| Volume | PowerShell + COM `IAudioEndpointVolume` |
 
 Works on Windows 10 and later.
 
@@ -190,6 +205,7 @@ Works on Windows 10 and later.
 | Gamma (Wayland other) | `wl-gammarelay-rs` via D-Bus | `wl-gammarelay-rs` |
 | Gamma (GNOME Wayland) | Falls back to XWayland xrandr | `xrandr` |
 | Dark/light mode | `gsettings` (GNOME), `plasma-apply-colorscheme` (KDE), `xfconf-query` (XFCE) | Desktop-dependent |
+| Volume | `pactl` (PulseAudio/PipeWire) with `amixer` (ALSA) fallback | Pre-installed on most desktops |
 
 #### Ubuntu / Debian
 
