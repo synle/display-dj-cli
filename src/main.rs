@@ -1084,76 +1084,161 @@ fn serve_set_scale_one(id: &str, pct: u16) -> String {
     format!(r#"{{"error":"display '{}' not found"}}"#, id)
 }
 
-// --- macOS: resolution-based scaling via system_profiler + displayplacer ---
+// --- macOS: CoreGraphics display mode APIs (native, no external deps) ---
 
 #[cfg(target_os = "macos")]
-fn get_all_scales() -> Vec<ScaleInfo> {
-    // Read current resolution and native resolution to compute scale
-    let output = match std::process::Command::new("system_profiler")
-        .args(["SPDisplaysDataType"])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return vec![],
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut scales = Vec::new();
-    let mut current_name = String::new();
-    let mut is_builtin = false;
-    let mut idx = 0u32;
-
-    for line in stdout.lines() {
-        let line = line.trim();
-        // Display name lines end with ":"
-        if line.ends_with(':') && !line.contains("Chipset") && !line.contains("Displays")
-            && !line.starts_with("Resolution") && !line.starts_with("UI")
-        {
-            current_name = line.trim_end_matches(':').to_string();
-            is_builtin = false;
-        }
-        if line.contains("Connection Type: Internal") || line == "Display Type: Built-in Liquid Retina XDR Display"
-            || line.starts_with("Display Type: Built-in")
-        {
-            is_builtin = true;
-        }
-        // "UI Looks like: 2560 x 1440 @ 144.00Hz" — this is the effective resolution
-        // "Resolution: 5120 x 2880 Retina" — this is the native resolution
-        if line.starts_with("Resolution:") && !current_name.is_empty() {
-            let id = if is_builtin {
-                BUILTIN_ID.to_string()
-            } else {
-                idx += 1;
-                idx.to_string()
-            };
-
-            // Parse native resolution
-            let res_part = line.strip_prefix("Resolution:").unwrap().trim();
-            let native_width = res_part.split('x').next()
-                .and_then(|s| s.trim().parse::<u32>().ok())
-                .unwrap_or(0);
-
-            // For now, report 100% since macOS doesn't expose scale factor directly
-            // The actual "scale" is native_res / ui_res but we'd need to parse UI Looks like too
-            let scale = if is_builtin && native_width > 2560 { 200 } else { 100 };
-
-            scales.push(ScaleInfo {
-                id,
-                name: current_name.clone(),
-                scale_percent: scale,
-            });
-        }
-    }
-    scales
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGGetActiveDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
+    fn CGDisplayIsBuiltin(display: u32) -> i32;
+    fn CGDisplayPixelsWide(display: u32) -> u64;
+    fn CGDisplayPixelsHigh(display: u32) -> u64;
+    fn CGDisplayCopyDisplayMode(display: u32) -> *const std::ffi::c_void;
+    fn CGDisplayCopyAllDisplayModes(display: u32, options: *const std::ffi::c_void) -> *const std::ffi::c_void;
+    fn CGDisplaySetDisplayMode(display: u32, mode: *const std::ffi::c_void, options: *const std::ffi::c_void) -> i32;
+    fn CGDisplayModeGetWidth(mode: *const std::ffi::c_void) -> u64;
+    fn CGDisplayModeGetHeight(mode: *const std::ffi::c_void) -> u64;
+    fn CGDisplayModeGetPixelWidth(mode: *const std::ffi::c_void) -> u64;
+    fn CGDisplayModeGetPixelHeight(mode: *const std::ffi::c_void) -> u64;
+    fn CGDisplayModeGetIOFlags(mode: *const std::ffi::c_void) -> u32;
+    fn CFArrayGetCount(arr: *const std::ffi::c_void) -> i64;
+    fn CFArrayGetValueAtIndex(arr: *const std::ffi::c_void, idx: i64) -> *const std::ffi::c_void;
+    fn CFRelease(cf: *const std::ffi::c_void);
 }
 
 #[cfg(target_os = "macos")]
-fn set_scale(_id: &str, _pct: u16) -> bool {
-    // macOS scaling requires switching display resolutions via displayplacer or
-    // system preferences. This is complex and varies per display.
-    // For now, report not supported — requires displayplacer to be installed.
-    eprintln!("(macOS scaling requires `displayplacer`. Install: brew install displayplacer)");
-    false
+fn get_all_scales() -> Vec<ScaleInfo> {
+    unsafe {
+        let mut displays = [0u32; 10];
+        let mut count: u32 = 0;
+        CGGetActiveDisplayList(10, displays.as_mut_ptr(), &mut count);
+
+        let mut scales = Vec::new();
+        let mut ext_idx = 0u32;
+
+        for i in 0..count as usize {
+            let did = displays[i];
+            let is_builtin = CGDisplayIsBuiltin(did) != 0;
+
+            let id = if is_builtin {
+                BUILTIN_ID.to_string()
+            } else {
+                ext_idx += 1;
+                ext_idx.to_string()
+            };
+
+            // Get current mode to read physical pixel width and logical width
+            let cur_mode = CGDisplayCopyDisplayMode(did);
+            if cur_mode.is_null() { continue; }
+            let pixel_w = CGDisplayModeGetPixelWidth(cur_mode);
+            let logical_w = CGDisplayModeGetWidth(cur_mode);
+            CFRelease(cur_mode);
+
+            // Scale = pixel_width / logical_width (e.g., 3456/1728 = 2.0 = 200%)
+            let scale = if logical_w > 0 {
+                ((pixel_w as f64 / logical_w as f64) * 100.0).round() as u32
+            } else {
+                100
+            };
+
+            let name = if is_builtin {
+                "Built-in Display".to_string()
+            } else {
+                // Try to get product name from ddc-macos enumeration
+                format!("Display {}", ext_idx)
+            };
+
+            scales.push(ScaleInfo { id, name, scale_percent: scale });
+        }
+        scales
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_scale(id: &str, pct: u16) -> bool {
+    unsafe {
+        // Find the display ID
+        let mut displays = [0u32; 10];
+        let mut count: u32 = 0;
+        CGGetActiveDisplayList(10, displays.as_mut_ptr(), &mut count);
+
+        let mut ext_idx = 0u32;
+        let mut target_did: Option<u32> = None;
+
+        for i in 0..count as usize {
+            let did = displays[i];
+            let is_builtin = CGDisplayIsBuiltin(did) != 0;
+            let display_id = if is_builtin {
+                BUILTIN_ID.to_string()
+            } else {
+                ext_idx += 1;
+                ext_idx.to_string()
+            };
+            if display_id == id || (id == "0" && is_builtin) {
+                target_did = Some(did);
+                break;
+            }
+        }
+
+        let did = match target_did {
+            Some(d) => d,
+            None => return false,
+        };
+
+        // Get current mode's pixel width (physical resolution)
+        let cur_mode = CGDisplayCopyDisplayMode(did);
+        if cur_mode.is_null() { return false; }
+        let pixel_w = CGDisplayModeGetPixelWidth(cur_mode);
+        CFRelease(cur_mode);
+        if pixel_w == 0 { return false; }
+
+        // Target logical width = pixel_width / (pct/100)
+        // e.g., 3456 pixels at 200% scale → 3456/2.0 = 1728 logical
+        let target_w = (pixel_w as f64 / (pct as f64 / 100.0)).round() as u64;
+
+        // Enumerate all modes and find the best match
+        let modes = CGDisplayCopyAllDisplayModes(did, std::ptr::null());
+        if modes.is_null() { return false; }
+
+        let mode_count = CFArrayGetCount(modes);
+        let mut best_mode: *const std::ffi::c_void = std::ptr::null();
+        let mut best_diff = u64::MAX;
+        let mut best_is_hidpi = false;
+
+        // Prefer HiDPI modes (pixel_width > logical_width)
+        let want_hidpi = pct >= 100;
+
+        for j in 0..mode_count {
+            let mode = CFArrayGetValueAtIndex(modes, j);
+            let flags = CGDisplayModeGetIOFlags(mode);
+            // kDisplayModeValidFlag (0x1) | kDisplayModeSafeFlag (0x2)
+            if flags & 0x3 != 0x3 { continue; }
+
+            let mode_logical_w = CGDisplayModeGetWidth(mode);
+            let mode_pixel_w = CGDisplayModeGetPixelWidth(mode);
+            let is_hidpi = mode_pixel_w > mode_logical_w;
+
+            let diff = (mode_logical_w as i64 - target_w as i64).unsigned_abs();
+            // Prefer HiDPI modes when available, then closest width
+            let better = diff < best_diff
+                || (diff == best_diff && is_hidpi && !best_is_hidpi && want_hidpi);
+            if better {
+                best_diff = diff;
+                best_mode = mode;
+                best_is_hidpi = is_hidpi;
+            }
+        }
+
+        let result = if !best_mode.is_null() {
+            let res = CGDisplaySetDisplayMode(did, best_mode, std::ptr::null());
+            res == 0
+        } else {
+            false
+        };
+
+        CFRelease(modes);
+        result
+    }
 }
 
 // --- Windows: DPI scaling via registry ---
