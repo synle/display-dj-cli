@@ -128,39 +128,66 @@ struct ExternalControl {
     ddc_supported: bool,
 }
 
+/// DDC retry settings for stubborn monitors.
+const DDC_WRITE_RETRIES: u32 = 5;
+const DDC_READ_RETRIES: u32 = 3;
+const DDC_RETRY_DELAY_MS: u64 = 50;
+
+/// Try reading a VCP feature with retries and delays between attempts.
+fn ddc_read_with_retry(mon: &mut ddc_macos::Monitor, vcp: u8) -> Option<(u16, u16)> {
+    for attempt in 0..DDC_READ_RETRIES {
+        if attempt > 0 {
+            thread::sleep(Duration::from_millis(DDC_RETRY_DELAY_MS));
+        }
+        if let Ok(val) = mon.get_vcp_feature(vcp) {
+            return Some((val.value(), val.maximum()));
+        }
+    }
+    None
+}
+
+/// Try writing a VCP feature with multiple attempts and delays.
+/// Some monitors (e.g., Acer XZ322QU V3) need repeated I2C writes
+/// before the hardware processes the command.
+fn ddc_write_with_retry(mon: &mut ddc_macos::Monitor, vcp: u8, value: u16) -> bool {
+    for attempt in 0..DDC_WRITE_RETRIES {
+        if attempt > 0 {
+            thread::sleep(Duration::from_millis(DDC_RETRY_DELAY_MS));
+        }
+        if mon.set_vcp_feature(vcp, value).is_ok() {
+            // Extra delay after successful write to let monitor process it
+            thread::sleep(Duration::from_millis(DDC_RETRY_DELAY_MS));
+            return true;
+        }
+    }
+    false
+}
+
 impl DisplayControl for ExternalControl {
     fn get_brightness(&mut self) -> Option<u32> {
-        // get_vcp_feature sends a DDC/CI read command over I2C.
-        // Returns a Value with current + maximum, which we convert to 0-100%.
-        self.ddc_monitor.get_vcp_feature(VCP_BRIGHTNESS).ok().map(|val| {
-            let max = val.maximum() as f64;
-            let cur = val.value() as f64;
-            if max > 0.0 { (cur / max * 100.0).round() as u32 } else { 50 }
+        ddc_read_with_retry(&mut self.ddc_monitor, VCP_BRIGHTNESS).map(|(cur, max)| {
+            if max > 0 { ((cur as f64 / max as f64) * 100.0).round() as u32 } else { 50 }
         })
     }
 
     fn get_contrast(&mut self) -> Option<u32> {
-        self.ddc_monitor.get_vcp_feature(VCP_CONTRAST).ok().map(|val| {
-            let max = val.maximum() as f64;
-            let cur = val.value() as f64;
-            if max > 0.0 { (cur / max * 100.0).round() as u32 } else { 50 }
+        ddc_read_with_retry(&mut self.ddc_monitor, VCP_CONTRAST).map(|(cur, max)| {
+            if max > 0 { ((cur as f64 / max as f64) * 100.0).round() as u32 } else { 50 }
         })
     }
 
     fn set_brightness(&mut self, value: u16, mode: &str) -> bool {
-        // Determine which methods to use based on mode
         let use_ddc = mode == "ddc" || mode == "force" || (mode == "auto" && self.ddc_supported);
+        // In force mode, always try DDC (even if initial read failed — write might work with retries)
+        let try_ddc = use_ddc || mode == "force";
         let use_gamma = mode == "gamma" || mode == "force" || (mode == "auto" && !self.ddc_supported);
         let mut ok = true;
 
-        if use_ddc && self.ddc_supported {
-            // Clamp to 1 — some monitors freeze or enter standby at DDC brightness 0
+        if try_ddc {
             let ddc_val = if value == 0 { 1 } else { value };
-            if self.ddc_monitor.set_vcp_feature(VCP_BRIGHTNESS, ddc_val).is_err() {
+            if !ddc_write_with_retry(&mut self.ddc_monitor, VCP_BRIGHTNESS, ddc_val) {
                 ok = false;
             }
-            // Brief delay — some monitors need time to process DDC commands
-            thread::sleep(Duration::from_millis(100));
         }
 
         if use_gamma {
@@ -171,8 +198,7 @@ impl DisplayControl for ExternalControl {
     }
 
     fn set_contrast(&mut self, value: u16) -> bool {
-        if !self.ddc_supported { return false; }
-        self.ddc_monitor.set_vcp_feature(VCP_CONTRAST, value).is_ok()
+        ddc_write_with_retry(&mut self.ddc_monitor, VCP_CONTRAST, value)
     }
 
     fn reset_gamma(&self) {
