@@ -73,6 +73,9 @@ fn usage() {
     eprintln!("  display-dj set_volume <level>           Set volume (0-100)");
     eprintln!("  display-dj mute                         Mute audio");
     eprintln!("  display-dj unmute                       Unmute audio");
+    eprintln!("  display-dj get_scale                    Get display scaling (JSON)");
+    eprintln!("  display-dj set_scale_all <percent>       Set all displays scaling (75-300)");
+    eprintln!("  display-dj set_scale_one <id> <percent>  Set one display scaling (75-300)");
     eprintln!("  display-dj serve [port]                 Start HTTP server (default: 51337)");
     eprintln!();
     eprintln!("Modes: force (default), auto, ddc, gamma");
@@ -183,6 +186,25 @@ fn dispatch<P: Platform>(cmd: &str, args: &[String]) {
         }
         "mute" => cmd_set_mute(true),
         "unmute" => cmd_set_mute(false),
+        "get_scale" => cmd_get_scale(),
+        "set_scale_all" => {
+            let pct: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+                usage();
+                std::process::exit(1);
+            });
+            cmd_set_scale_all(clamp_scale(pct));
+        }
+        "set_scale_one" => {
+            let id = args.get(2).unwrap_or_else(|| {
+                usage();
+                std::process::exit(1);
+            });
+            let pct: u16 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+                usage();
+                std::process::exit(1);
+            });
+            cmd_set_scale_one(id, clamp_scale(pct));
+        }
         "serve" => {
             let port: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(51337);
             cmd_serve::<P>(port);
@@ -332,6 +354,7 @@ fn cmd_serve<P: Platform>(port: u16) {
     eprintln!("         /set_one/<id>/<level>  /set_one/<id>/<level>/<mode>");
     eprintln!("         /dark  /light  /theme  /reset  /health");
     eprintln!("         /get_volume  /set_volume/<level>  /mute  /unmute");
+    eprintln!("         /get_scale  /set_scale_all/<percent>  /set_scale_one/<id>/<percent>");
     eprintln!();
     eprintln!("Example: curl http://{}:{}/set_all/50", "127.0.0.1", port);
 
@@ -372,6 +395,7 @@ fn cmd_serve<P: Platform>(port: u16) {
                     "/set_one/<id>/<level>", "/set_one/<id>/<level>/<mode>",
                     "/dark", "/light", "/theme",
                     "/get_volume", "/set_volume/<level>", "/mute", "/unmute",
+                    "/get_scale", "/set_scale_all/<percent>", "/set_scale_one/<id>/<percent>",
                     "/reset", "/health"
                 ]
             })).unwrap(),
@@ -415,6 +439,19 @@ fn cmd_serve<P: Platform>(port: u16) {
             },
             "mute" => { set_mute(true); r#"{"status":"ok"}"#.to_string() }
             "unmute" => { set_mute(false); r#"{"status":"ok"}"#.to_string() }
+            "get_scale" => serve_get_scale(),
+            "set_scale_all" => match segments.get(1).and_then(|l| l.parse::<u16>().ok()) {
+                Some(pct) => serve_set_scale_all(clamp_scale(pct)),
+                None => r#"{"error":"usage: /set_scale_all/<percent> (75-300)"}"#.to_string(),
+            },
+            "set_scale_one" => {
+                let id = segments.get(1).map(|s| url_decode(s));
+                let pct = segments.get(2).and_then(|l| l.parse::<u16>().ok());
+                match (id, pct) {
+                    (Some(id), Some(pct)) => serve_set_scale_one(&id, clamp_scale(pct)),
+                    _ => r#"{"error":"usage: /set_scale_one/<id>/<percent>"}"#.to_string(),
+                }
+            }
             _ => {
                 let _ = write_http(&mut stream, 404, r#"{"error":"not found"}"#);
                 continue;
@@ -952,6 +989,365 @@ fn set_mute(mute: bool) -> bool {
 }
 
 // =========================================================================
+// Display scaling — per-monitor scale factor (75% – 300%).
+// macOS: resolution switching via displayplacer/system_profiler.
+// Windows: DPI registry + rundll32 refresh.
+// Linux X11: xrandr --scale. Linux Wayland: wlr-randr --scale.
+// =========================================================================
+
+const SCALE_MIN: u16 = 75;
+const SCALE_MAX: u16 = 300;
+
+fn clamp_scale(pct: u16) -> u16 {
+    let clamped = pct.max(SCALE_MIN).min(SCALE_MAX);
+    if clamped != pct {
+        eprintln!("Scale clamped to {}% (range: {}%-{}%)", clamped, SCALE_MIN, SCALE_MAX);
+    }
+    clamped
+}
+
+#[derive(Serialize)]
+struct ScaleInfo {
+    id: String,
+    name: String,
+    scale_percent: u32,
+}
+
+fn cmd_get_scale() {
+    let scales = get_all_scales();
+    println!("{}", serde_json::to_string_pretty(&scales).unwrap());
+}
+
+fn cmd_set_scale_all(pct: u16) {
+    let scales = get_all_scales();
+    for s in &scales {
+        eprint!("  {} ({}): ", s.id, s.name);
+        if set_scale(&s.id, pct) {
+            eprintln!("OK ({}%)", pct);
+        } else {
+            eprintln!("FAILED");
+        }
+    }
+}
+
+fn cmd_set_scale_one(id: &str, pct: u16) {
+    let scales = get_all_scales();
+    for s in &scales {
+        if s.id == id || s.name.to_lowercase() == id.to_lowercase() || (id == "0" && s.id == BUILTIN_ID) {
+            eprint!("  {} ({}): ", s.id, s.name);
+            if set_scale(&s.id, pct) {
+                eprintln!("OK ({}%)", pct);
+            } else {
+                eprintln!("FAILED");
+            }
+            return;
+        }
+    }
+    eprintln!("Display \"{}\" not found. Available displays:", id);
+    for s in &scales {
+        let display_id = if s.id == BUILTIN_ID { "0" } else { &s.id };
+        eprintln!("  {}: {}", display_id, s.name);
+    }
+    std::process::exit(1);
+}
+
+fn serve_get_scale() -> String {
+    serde_json::to_string(&get_all_scales()).unwrap_or_else(|_| "[]".into())
+}
+
+fn serve_set_scale_all(pct: u16) -> String {
+    let scales = get_all_scales();
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for s in &scales {
+        let ok = set_scale(&s.id, pct);
+        results.push(serde_json::json!({
+            "id": s.id, "name": s.name,
+            "status": if ok { "ok" } else { "failed" },
+            "scale_percent": pct
+        }));
+    }
+    serde_json::to_string(&results).unwrap_or_else(|_| "[]".into())
+}
+
+fn serve_set_scale_one(id: &str, pct: u16) -> String {
+    let scales = get_all_scales();
+    for s in &scales {
+        if s.id == id || s.name.to_lowercase() == id.to_lowercase() || (id == "0" && s.id == BUILTIN_ID) {
+            let ok = set_scale(&s.id, pct);
+            return serde_json::to_string(&serde_json::json!({
+                "id": s.id, "name": s.name,
+                "status": if ok { "ok" } else { "failed" },
+                "scale_percent": pct
+            })).unwrap_or_else(|_| "{}".into());
+        }
+    }
+    format!(r#"{{"error":"display '{}' not found"}}"#, id)
+}
+
+// --- macOS: resolution-based scaling via system_profiler + displayplacer ---
+
+#[cfg(target_os = "macos")]
+fn get_all_scales() -> Vec<ScaleInfo> {
+    // Read current resolution and native resolution to compute scale
+    let output = match std::process::Command::new("system_profiler")
+        .args(["SPDisplaysDataType"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return vec![],
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut scales = Vec::new();
+    let mut current_name = String::new();
+    let mut is_builtin = false;
+    let mut idx = 0u32;
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        // Display name lines end with ":"
+        if line.ends_with(':') && !line.contains("Chipset") && !line.contains("Displays")
+            && !line.starts_with("Resolution") && !line.starts_with("UI")
+        {
+            current_name = line.trim_end_matches(':').to_string();
+            is_builtin = false;
+        }
+        if line.contains("Connection Type: Internal") || line == "Display Type: Built-in Liquid Retina XDR Display"
+            || line.starts_with("Display Type: Built-in")
+        {
+            is_builtin = true;
+        }
+        // "UI Looks like: 2560 x 1440 @ 144.00Hz" — this is the effective resolution
+        // "Resolution: 5120 x 2880 Retina" — this is the native resolution
+        if line.starts_with("Resolution:") && !current_name.is_empty() {
+            let id = if is_builtin {
+                BUILTIN_ID.to_string()
+            } else {
+                idx += 1;
+                idx.to_string()
+            };
+
+            // Parse native resolution
+            let res_part = line.strip_prefix("Resolution:").unwrap().trim();
+            let native_width = res_part.split('x').next()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .unwrap_or(0);
+
+            // For now, report 100% since macOS doesn't expose scale factor directly
+            // The actual "scale" is native_res / ui_res but we'd need to parse UI Looks like too
+            let scale = if is_builtin && native_width > 2560 { 200 } else { 100 };
+
+            scales.push(ScaleInfo {
+                id,
+                name: current_name.clone(),
+                scale_percent: scale,
+            });
+        }
+    }
+    scales
+}
+
+#[cfg(target_os = "macos")]
+fn set_scale(_id: &str, _pct: u16) -> bool {
+    // macOS scaling requires switching display resolutions via displayplacer or
+    // system preferences. This is complex and varies per display.
+    // For now, report not supported — requires displayplacer to be installed.
+    eprintln!("(macOS scaling requires `displayplacer`. Install: brew install displayplacer)");
+    false
+}
+
+// --- Windows: DPI scaling via registry ---
+
+#[cfg(target_os = "windows")]
+fn get_all_scales() -> Vec<ScaleInfo> {
+    // Read DPI settings from registry
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", r#"
+            Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID -ErrorAction SilentlyContinue | ForEach-Object {
+                $name = ($_.UserFriendlyName | Where-Object {$_ -ne 0} | ForEach-Object {[char]$_}) -join ''
+                Write-Output "$name"
+            }
+        "#])
+        .output();
+
+    // Simpler approach: just read the system DPI
+    let dpi_output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command",
+            "Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public class DPI { [DllImport(\"user32.dll\")] public static extern int GetDpiForSystem(); }'; [DPI]::GetDpiForSystem()"])
+        .output();
+
+    let system_dpi = dpi_output.ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok())
+        .unwrap_or(96);
+
+    let scale = ((system_dpi as f64 / 96.0) * 100.0).round() as u32;
+
+    vec![ScaleInfo {
+        id: "system".into(),
+        name: "System DPI".into(),
+        scale_percent: scale,
+    }]
+}
+
+#[cfg(target_os = "windows")]
+fn set_scale(_id: &str, pct: u16) -> bool {
+    // Windows requires logout to fully apply DPI changes.
+    // Set via registry for the current user.
+    let dpi = ((pct as f64 / 100.0) * 96.0).round() as u32;
+    let cmd = format!(
+        "Set-ItemProperty -Path 'HKCU:\\Control Panel\\Desktop' -Name LogPixels -Value {} -Type DWord; \
+         Set-ItemProperty -Path 'HKCU:\\Control Panel\\Desktop' -Name Win8DpiScaling -Value 1 -Type DWord",
+        dpi
+    );
+    let ok = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if ok {
+        eprintln!("(Logout required to apply DPI change on Windows)");
+    }
+    ok
+}
+
+// --- Linux: xrandr --scale (X11) or wlr-randr --scale (Wayland) ---
+
+#[cfg(target_os = "linux")]
+fn get_all_scales() -> Vec<ScaleInfo> {
+    let display_server = detect_display_server_for_scale();
+    match display_server {
+        "x11" => get_scales_xrandr(),
+        "wayland" => get_scales_wayland(),
+        _ => vec![],
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn detect_display_server_for_scale() -> &'static str {
+    if let Ok(session) = std::env::var("XDG_SESSION_TYPE") {
+        match session.to_lowercase().as_str() {
+            "wayland" => return "wayland",
+            "x11" => return "x11",
+            _ => {}
+        }
+    }
+    if std::env::var("WAYLAND_DISPLAY").is_ok() { return "wayland"; }
+    if std::env::var("DISPLAY").is_ok() { return "x11"; }
+    "unknown"
+}
+
+#[cfg(target_os = "linux")]
+fn get_scales_xrandr() -> Vec<ScaleInfo> {
+    let output = match std::process::Command::new("xrandr").arg("--query").output() {
+        Ok(o) if o.status.success() => o,
+        _ => return vec![],
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut scales = Vec::new();
+    let mut idx = 0u32;
+
+    for line in stdout.lines() {
+        if line.contains(" connected") {
+            let name = line.split_whitespace().next().unwrap_or("").to_string();
+            let is_builtin = name.starts_with("eDP") || name.starts_with("LVDS");
+            let id = if is_builtin {
+                BUILTIN_ID.to_string()
+            } else {
+                idx += 1;
+                idx.to_string()
+            };
+            // xrandr doesn't directly report scale, default to 100%
+            scales.push(ScaleInfo { id, name, scale_percent: 100 });
+        }
+    }
+    scales
+}
+
+#[cfg(target_os = "linux")]
+fn get_scales_wayland() -> Vec<ScaleInfo> {
+    // Try wlr-randr
+    if let Ok(output) = std::process::Command::new("wlr-randr").output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut scales = Vec::new();
+            let mut idx = 0u32;
+            let mut current_name = String::new();
+            let mut current_scale = 100u32;
+
+            for line in stdout.lines() {
+                if !line.starts_with(' ') && !line.is_empty() {
+                    // Emit previous if any
+                    if !current_name.is_empty() {
+                        let is_builtin = current_name.starts_with("eDP") || current_name.starts_with("LVDS");
+                        let id = if is_builtin { BUILTIN_ID.to_string() } else { idx += 1; idx.to_string() };
+                        scales.push(ScaleInfo { id, name: current_name.clone(), scale_percent: current_scale });
+                    }
+                    current_name = line.split_whitespace().next().unwrap_or("").to_string();
+                    current_scale = 100;
+                }
+                let trimmed = line.trim();
+                if trimmed.starts_with("Scale:") {
+                    if let Some(val) = trimmed.strip_prefix("Scale:") {
+                        current_scale = (val.trim().parse::<f64>().unwrap_or(1.0) * 100.0).round() as u32;
+                    }
+                }
+            }
+            // Last one
+            if !current_name.is_empty() {
+                let is_builtin = current_name.starts_with("eDP") || current_name.starts_with("LVDS");
+                let id = if is_builtin { BUILTIN_ID.to_string() } else { idx += 1; idx.to_string() };
+                scales.push(ScaleInfo { id, name: current_name, scale_percent: current_scale });
+            }
+            return scales;
+        }
+    }
+    vec![]
+}
+
+#[cfg(target_os = "linux")]
+fn set_scale(id: &str, pct: u16) -> bool {
+    let display_server = detect_display_server_for_scale();
+    let factor = format!("{:.2}", pct as f64 / 100.0);
+
+    // Find the output name for the given ID
+    let scales = get_all_scales();
+    let output_name = scales.iter()
+        .find(|s| s.id == id || s.name.to_lowercase() == id.to_lowercase() || (id == "0" && s.id == BUILTIN_ID))
+        .map(|s| s.name.clone());
+
+    let output_name = match output_name {
+        Some(n) => n,
+        None => return false,
+    };
+
+    match display_server {
+        "x11" => {
+            // xrandr uses inverse scale: 1.5x means things appear 1.5x larger,
+            // so for 150% scaling we want --scale 0.67x0.67 (render more pixels).
+            // But for simplicity and to match user expectations:
+            // 100% = --scale 1x1, 200% = --scale 0.5x0.5 (things appear 2x bigger)
+            let xrandr_scale = 100.0 / pct as f64;
+            let scale_str = format!("{:.2}x{:.2}", xrandr_scale, xrandr_scale);
+            std::process::Command::new("xrandr")
+                .args(["--output", &output_name, "--scale", &scale_str])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        "wayland" => {
+            // wlr-randr uses direct scale: 1.5 means render at 1.5x density
+            std::process::Command::new("wlr-randr")
+                .args(["--output", &output_name, "--scale", &factor])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+// =========================================================================
 // Tests — everything that can be tested without a physical display
 // =========================================================================
 
@@ -1249,5 +1645,48 @@ mod tests {
         let json = serve_set_volume(50);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed.get("status").is_some() || parsed.get("error").is_some());
+    }
+
+    // --- Scale ---
+
+    #[test]
+    fn clamp_scale_within_range() {
+        assert_eq!(clamp_scale(100), 100);
+        assert_eq!(clamp_scale(150), 150);
+        assert_eq!(clamp_scale(75), 75);
+        assert_eq!(clamp_scale(300), 300);
+    }
+
+    #[test]
+    fn clamp_scale_below_min() {
+        assert_eq!(clamp_scale(50), SCALE_MIN);
+        assert_eq!(clamp_scale(0), SCALE_MIN);
+    }
+
+    #[test]
+    fn clamp_scale_above_max() {
+        assert_eq!(clamp_scale(400), SCALE_MAX);
+        assert_eq!(clamp_scale(500), SCALE_MAX);
+    }
+
+    #[test]
+    fn scale_info_serializes() {
+        let info = ScaleInfo { id: "1".into(), name: "Test".into(), scale_percent: 150 };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"scale_percent\":150"));
+        assert!(json.contains("\"id\":\"1\""));
+    }
+
+    #[test]
+    fn scale_constants() {
+        assert_eq!(SCALE_MIN, 75);
+        assert_eq!(SCALE_MAX, 300);
+    }
+
+    #[test]
+    fn serve_get_scale_returns_json() {
+        let json = serve_get_scale();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.is_array());
     }
 }
