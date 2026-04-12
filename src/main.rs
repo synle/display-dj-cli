@@ -69,6 +69,10 @@ fn usage() {
     eprintln!("  display-dj dark                         Switch to dark mode");
     eprintln!("  display-dj light                        Switch to light mode");
     eprintln!("  display-dj theme                        Get current theme (JSON)");
+    eprintln!("  display-dj get_volume                   Get volume (JSON)");
+    eprintln!("  display-dj set_volume <level>           Set volume (0-100)");
+    eprintln!("  display-dj mute                         Mute audio");
+    eprintln!("  display-dj unmute                       Unmute audio");
     eprintln!("  display-dj serve [port]                 Start HTTP server (default: 51337)");
     eprintln!();
     eprintln!("Modes: force (default), auto, ddc, gamma");
@@ -169,6 +173,16 @@ fn dispatch<P: Platform>(cmd: &str, args: &[String]) {
         "dark" => cmd_theme(true),
         "light" => cmd_theme(false),
         "theme" => cmd_get_theme(),
+        "get_volume" => cmd_get_volume(),
+        "set_volume" => {
+            let level: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+                usage();
+                std::process::exit(1);
+            });
+            cmd_set_volume(level.min(100));
+        }
+        "mute" => cmd_set_mute(true),
+        "unmute" => cmd_set_mute(false),
         "serve" => {
             let port: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(51337);
             cmd_serve::<P>(port);
@@ -317,6 +331,7 @@ fn cmd_serve<P: Platform>(port: u16) {
     eprintln!("Routes:  /list  /get_all  /get_one/<id>  /set_all/<level>  /set_all/<level>/<mode>");
     eprintln!("         /set_one/<id>/<level>  /set_one/<id>/<level>/<mode>");
     eprintln!("         /dark  /light  /theme  /reset  /health");
+    eprintln!("         /get_volume  /set_volume/<level>  /mute  /unmute");
     eprintln!();
     eprintln!("Example: curl http://{}:{}/set_all/50", "127.0.0.1", port);
 
@@ -393,6 +408,13 @@ fn cmd_serve<P: Platform>(port: u16) {
                 Some(false) => r#"{"theme":"light"}"#.to_string(),
                 None => r#"{"error":"could not detect theme"}"#.to_string(),
             },
+            "get_volume" => serve_get_volume(),
+            "set_volume" => match segments.get(1).and_then(|l| l.parse::<u16>().ok()) {
+                Some(level) => serve_set_volume(level.min(100)),
+                None => r#"{"error":"usage: /set_volume/<level>"}"#.to_string(),
+            },
+            "mute" => { set_mute(true); r#"{"status":"ok"}"#.to_string() }
+            "unmute" => { set_mute(false); r#"{"status":"ok"}"#.to_string() }
             _ => {
                 let _ = write_http(&mut stream, 404, r#"{"error":"not found"}"#);
                 continue;
@@ -655,6 +677,290 @@ fn get_dark_mode() -> Option<bool> {
     }
 
     None // couldn't detect theme on any DE
+}
+
+// =========================================================================
+// Volume control — adjusts the default/currently-selected audio output.
+// Cross-platform: macOS (osascript), Windows (PowerShell), Linux (pactl/amixer).
+// =========================================================================
+
+#[derive(Serialize)]
+struct VolumeInfo {
+    volume: u32,
+    muted: bool,
+}
+
+fn cmd_get_volume() {
+    match get_volume() {
+        Some(info) => println!("{}", serde_json::to_string_pretty(&info).unwrap()),
+        None => {
+            eprintln!("Could not read volume.");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_set_volume(level: u16) {
+    if set_volume(level) {
+        eprintln!("Volume set to {}%.", level);
+    } else {
+        eprintln!("Failed to set volume.");
+        std::process::exit(1);
+    }
+}
+
+fn cmd_set_mute(mute: bool) {
+    if set_mute(mute) {
+        eprintln!("Audio {}.", if mute { "muted" } else { "unmuted" });
+    } else {
+        eprintln!("Failed to {} audio.", if mute { "mute" } else { "unmute" });
+        std::process::exit(1);
+    }
+}
+
+fn serve_get_volume() -> String {
+    match get_volume() {
+        Some(info) => serde_json::to_string(&info).unwrap_or_else(|_| "{}".into()),
+        None => r#"{"error":"could not read volume"}"#.to_string(),
+    }
+}
+
+fn serve_set_volume(level: u16) -> String {
+    if set_volume(level) {
+        format!(r#"{{"status":"ok","volume":{}}}"#, level)
+    } else {
+        r#"{"error":"failed to set volume"}"#.to_string()
+    }
+}
+
+// --- macOS: osascript ---
+
+#[cfg(target_os = "macos")]
+fn get_volume() -> Option<VolumeInfo> {
+    let output = std::process::Command::new("osascript")
+        .args(["-e", "output volume of (get volume settings)"])
+        .output().ok()?;
+    if !output.status.success() { return None; }
+    let volume: u32 = String::from_utf8_lossy(&output.stdout).trim().parse().ok()?;
+
+    let output = std::process::Command::new("osascript")
+        .args(["-e", "output muted of (get volume settings)"])
+        .output().ok()?;
+    let muted = String::from_utf8_lossy(&output.stdout).trim().to_lowercase() == "true";
+
+    Some(VolumeInfo { volume, muted })
+}
+
+#[cfg(target_os = "macos")]
+fn set_volume(level: u16) -> bool {
+    std::process::Command::new("osascript")
+        .args(["-e", &format!("set volume output volume {}", level)])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn set_mute(mute: bool) -> bool {
+    let val = if mute { "true" } else { "false" };
+    std::process::Command::new("osascript")
+        .args(["-e", &format!("set volume output muted {}", val)])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+// --- Windows: PowerShell + COM audio ---
+
+#[cfg(target_os = "windows")]
+fn get_volume() -> Option<VolumeInfo> {
+    // Use PowerShell with audio COM objects
+    let ps = r#"
+        Add-Type -TypeDefinition @'
+        using System.Runtime.InteropServices;
+        [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IAudioEndpointVolume {
+            int _0(); int _1(); int _2(); int _3(); int _4(); int _5(); int _6(); int _7(); int _8(); int _9(); int _10(); int _11();
+            int GetMasterVolumeLevelScalar(out float level);
+            int SetMasterVolumeLevelScalar(float level, System.Guid ctx);
+            int GetMute(out bool mute);
+        }
+        [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IMMDevice { int Activate(ref System.Guid id, int ctx, System.IntPtr p, out IAudioEndpointVolume ep); }
+        [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IMMDeviceEnumerator { int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice dev); }
+        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumerator {}
+'@
+        $e = New-Object MMDeviceEnumerator
+        $dev = $null; $e.GetDefaultAudioEndpoint(0, 1, [ref]$dev) | Out-Null
+        $id = [Guid]'5CDF2C82-841E-4546-9722-0CF74078229A'
+        $vol = $null; $dev.Activate([ref]$id, 1, [IntPtr]::Zero, [ref]$vol) | Out-Null
+        $level = 0.0; $vol.GetMasterVolumeLevelScalar([ref]$level) | Out-Null
+        $mute = $false; $vol.GetMute([ref]$mute) | Out-Null
+        Write-Output "$([math]::Round($level * 100)),$mute"
+    "#;
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", ps])
+        .output().ok()?;
+    if !output.status.success() { return None; }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let mut parts = stdout.split(',');
+    let volume: u32 = parts.next()?.parse().ok()?;
+    let muted = parts.next()?.trim().to_lowercase() == "true";
+    Some(VolumeInfo { volume, muted })
+}
+
+#[cfg(target_os = "windows")]
+fn set_volume(level: u16) -> bool {
+    let ps = format!(r#"
+        Add-Type -TypeDefinition @'
+        using System.Runtime.InteropServices;
+        [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IAudioEndpointVolume {{
+            int _0(); int _1(); int _2(); int _3(); int _4(); int _5(); int _6(); int _7(); int _8(); int _9(); int _10(); int _11();
+            int GetMasterVolumeLevelScalar(out float level);
+            int SetMasterVolumeLevelScalar(float level, System.Guid ctx);
+        }}
+        [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IMMDevice {{ int Activate(ref System.Guid id, int ctx, System.IntPtr p, out IAudioEndpointVolume ep); }}
+        [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IMMDeviceEnumerator {{ int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice dev); }}
+        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumerator {{}}
+'@
+        $e = New-Object MMDeviceEnumerator
+        $dev = $null; $e.GetDefaultAudioEndpoint(0, 1, [ref]$dev) | Out-Null
+        $id = [Guid]'5CDF2C82-841E-4546-9722-0CF74078229A'
+        $vol = $null; $dev.Activate([ref]$id, 1, [IntPtr]::Zero, [ref]$vol) | Out-Null
+        $vol.SetMasterVolumeLevelScalar({:.2}, [Guid]::Empty) | Out-Null
+    "#, level as f64 / 100.0);
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn set_mute(mute: bool) -> bool {
+    // Use NirCmd or PowerShell — simpler approach with nircmd if available, else PowerShell
+    let action = if mute { "1" } else { "0" };
+    let ps = format!(r#"
+        $obj = New-Object -ComObject WScript.Shell
+        {}
+    "#, if mute {
+        // Toggle approach: send volume mute key
+        "$obj.SendKeys([char]173)"
+    } else {
+        "$obj.SendKeys([char]173)"
+    });
+    // Simpler: use powershell to set mute via COM audio
+    let ps = format!(r#"
+        Add-Type -TypeDefinition @'
+        using System.Runtime.InteropServices;
+        [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IAudioEndpointVolume {{
+            int _0(); int _1(); int _2(); int _3(); int _4(); int _5(); int _6(); int _7(); int _8(); int _9(); int _10();
+            int SetMute(bool mute, System.Guid ctx);
+        }}
+        [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IMMDevice {{ int Activate(ref System.Guid id, int ctx, System.IntPtr p, out IAudioEndpointVolume ep); }}
+        [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IMMDeviceEnumerator {{ int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice dev); }}
+        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumerator {{}}
+'@
+        $e = New-Object MMDeviceEnumerator
+        $dev = $null; $e.GetDefaultAudioEndpoint(0, 1, [ref]$dev) | Out-Null
+        $id = [Guid]'5CDF2C82-841E-4546-9722-0CF74078229A'
+        $vol = $null; $dev.Activate([ref]$id, 1, [IntPtr]::Zero, [ref]$vol) | Out-Null
+        $vol.SetMute(${}, [Guid]::Empty) | Out-Null
+    "#, mute);
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+// --- Linux: pactl (PulseAudio/PipeWire) with amixer fallback ---
+
+#[cfg(target_os = "linux")]
+fn get_volume() -> Option<VolumeInfo> {
+    // Try pactl first (PulseAudio / PipeWire)
+    if let Some(info) = get_volume_pactl() { return Some(info); }
+    // Fallback to amixer (ALSA)
+    get_volume_amixer()
+}
+
+#[cfg(target_os = "linux")]
+fn get_volume_pactl() -> Option<VolumeInfo> {
+    let output = std::process::Command::new("pactl")
+        .args(["get-sink-volume", "@DEFAULT_SINK@"])
+        .output().ok()?;
+    if !output.status.success() { return None; }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Parse "Volume: front-left: 32768 /  50% / ..."
+    let volume = stdout.split('/')
+        .find(|s| s.contains('%'))
+        .and_then(|s| s.trim().trim_end_matches('%').parse::<u32>().ok())?;
+
+    let mute_output = std::process::Command::new("pactl")
+        .args(["get-sink-mute", "@DEFAULT_SINK@"])
+        .output().ok()?;
+    let muted = String::from_utf8_lossy(&mute_output.stdout)
+        .to_lowercase().contains("yes");
+
+    Some(VolumeInfo { volume, muted })
+}
+
+#[cfg(target_os = "linux")]
+fn get_volume_amixer() -> Option<VolumeInfo> {
+    let output = std::process::Command::new("amixer")
+        .args(["get", "Master"])
+        .output().ok()?;
+    if !output.status.success() { return None; }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let volume = stdout.split('[')
+        .find(|s| s.contains("%]"))
+        .and_then(|s| s.split('%').next())
+        .and_then(|s| s.parse::<u32>().ok())?;
+    let muted = stdout.contains("[off]");
+    Some(VolumeInfo { volume, muted })
+}
+
+#[cfg(target_os = "linux")]
+fn set_volume(level: u16) -> bool {
+    // Try pactl first
+    if std::process::Command::new("pactl")
+        .args(["set-sink-volume", "@DEFAULT_SINK@", &format!("{}%", level)])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    { return true; }
+    // Fallback to amixer
+    std::process::Command::new("amixer")
+        .args(["set", "Master", &format!("{}%", level)])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn set_mute(mute: bool) -> bool {
+    let val = if mute { "1" } else { "0" };
+    // Try pactl
+    if std::process::Command::new("pactl")
+        .args(["set-sink-mute", "@DEFAULT_SINK@", val])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    { return true; }
+    // Fallback to amixer
+    let toggle = if mute { "mute" } else { "unmute" };
+    std::process::Command::new("amixer")
+        .args(["set", "Master", toggle])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 // =========================================================================
