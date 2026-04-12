@@ -1,6 +1,6 @@
 # display-dj
 
-Cross-platform CLI for monitor brightness, volume, and dark mode control.
+Cross-platform CLI for monitor brightness, display scaling, system volume, and dark mode control.
 
 ## Architecture
 
@@ -11,7 +11,7 @@ The `DisplayControl` trait defines: `get_brightness`, `get_contrast`, `set_brigh
 
 All displays (built-in + external) are unified under the same interface with consistent IDs: `builtin` (or `0`), `1`, `2`, etc. Display lookup supports both ID and monitor name (case-insensitive).
 
-Dark mode and volume control live directly in `main.rs` behind `#[cfg(target_os)]` blocks — they're OS-level features, not per-display.
+Dark mode, volume, and scaling live directly in `main.rs` behind `#[cfg(target_os)]` blocks — they're OS-level features, not per-display (except scaling which is per-display).
 
 ### macOS (`src/macos.rs` + `main.rs`)
 
@@ -20,6 +20,7 @@ Dark mode and volume control live directly in `main.rs` behind `#[cfg(target_os)
 3. **External gamma**: `CGSetDisplayTransferByFormula`. Resets on process exit.
 4. **Dark mode**: `osascript` via System Events (`tell appearance preferences to set dark mode`).
 5. **Volume**: `osascript` — `get volume settings` / `set volume output volume`.
+6. **Scaling**: CoreGraphics native FFI — `CGDisplayCopyAllDisplayModes` to enumerate modes, `CGDisplaySetDisplayMode` to switch. Scale = `CGDisplayModeGetPixelWidth / CGDisplayModeGetWidth`. No external deps.
 
 ### Windows (`src/windows.rs` + `main.rs`)
 
@@ -28,6 +29,7 @@ Dark mode and volume control live directly in `main.rs` behind `#[cfg(target_os)
 3. **External gamma**: `SetDeviceGammaRamp` via GDI32.
 4. **Dark mode**: Registry keys `AppsUseLightTheme` + `SystemUsesLightTheme` via `reg add`.
 5. **Volume**: PowerShell + COM `IAudioEndpointVolume` (default audio endpoint).
+6. **Scaling**: Registry DPI (`LogPixels` + `Win8DpiScaling`). Requires logout to apply.
 
 ### Linux (`src/linux.rs` + `main.rs`)
 
@@ -39,13 +41,17 @@ Dark mode and volume control live directly in `main.rs` behind `#[cfg(target_os)
 6. **Output name mapping**: `xrandr --listactivemonitors` (X11), `wlr-randr` / `swaymsg` (Wayland). Filters out eDP/LVDS (built-in).
 7. **Dark mode**: Tries in order: `gsettings` (GNOME color-scheme + gtk-theme), `plasma-apply-colorscheme` (KDE), `xfconf-query` (XFCE).
 8. **Volume**: `pactl` (PulseAudio/PipeWire) with `amixer` (ALSA) fallback.
+9. **Scaling (X11)**: `xrandr --scale`. Uses inverse scale (100%/target) since xrandr scales the framebuffer.
+10. **Scaling (Wayland)**: `wlr-randr --scale`. Direct scale factor.
 
-### Known monitor behaviors
+### Known behaviors
 
 - Some monitors (e.g., Acer XZ322QU V3) return DDC/CI checksum errors on reads and silently ignore writes. These need gamma fallback.
 - DDC brightness 0 can cause monitors to enter standby/freeze. Clamped to minimum 1.
 - Gamma on a monitor with low DDC backlight produces minimal visible change (the effects multiply).
 - The `force` mode (DDC + gamma stacked) provides the most consistent results across mixed monitor setups.
+- Scale is clamped to 75%-300% on all platforms to prevent unusable UI.
+- macOS scaling switches display modes (resolution-based). Windows requires logout. Linux X11/Wayland applies instantly.
 
 ## CLI
 
@@ -68,6 +74,11 @@ display-dj get_volume
 display-dj set_volume <level>
 display-dj mute
 display-dj unmute
+
+# Scaling
+display-dj get_scale
+display-dj set_scale_all <percent>
+display-dj set_scale_one <id|name> <percent>
 
 # Server
 display-dj serve [port]

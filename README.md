@@ -1,6 +1,6 @@
 # display-dj
 
-Cross-platform CLI for controlling monitor brightness, system volume, and dark mode.
+Cross-platform CLI for controlling monitor brightness, display scaling, system volume, and dark mode.
 
 Supports **macOS**, **Windows**, and **Linux** (X11 + Wayland).
 
@@ -48,6 +48,9 @@ display-dj get_volume                   # Get volume (JSON)
 display-dj set_volume <level>           # Set volume (0-100)
 display-dj mute                         # Mute audio
 display-dj unmute                       # Unmute audio
+display-dj get_scale                    # Get display scaling (JSON)
+display-dj set_scale_all <percent>      # Set all displays scaling (75-300)
+display-dj set_scale_one <id> <percent> # Set one display scaling (75-300)
 display-dj serve [port]                 # Start HTTP server (default: 51337)
 ```
 
@@ -67,6 +70,9 @@ display-dj get_volume                   # read volume as JSON
 display-dj set_volume 50                # set volume to 50%
 display-dj mute                         # mute
 display-dj unmute                       # unmute
+display-dj get_scale                    # see current scale per display
+display-dj set_scale_all 150            # set all displays to 150%
+display-dj set_scale_one builtin 200    # set built-in to 200% (Retina)
 display-dj serve                        # start HTTP server on port 51337
 ```
 
@@ -123,6 +129,11 @@ curl localhost:51337/set_volume/50
 curl localhost:51337/mute
 curl localhost:51337/unmute
 
+# Scaling
+curl localhost:51337/get_scale
+curl localhost:51337/set_scale_all/150
+curl localhost:51337/set_scale_one/builtin/200
+
 # Utility
 curl localhost:51337/reset
 curl localhost:51337/health
@@ -175,6 +186,7 @@ curl -s localhost:51337/get_all | jq '.[].brightness'
 | Gamma (software dimming) | `CGSetDisplayTransferByFormula` (CoreGraphics) |
 | Dark/light mode | `osascript` (System Events) |
 | Volume | `osascript` (`get volume settings` / `set volume output volume`) |
+| Scaling | CoreGraphics native FFI (`CGDisplayCopyAllDisplayModes` / `CGDisplaySetDisplayMode`) |
 
 Works on macOS 11+ (Big Sur and later). Apple Silicon and Intel.
 
@@ -189,6 +201,7 @@ Works on macOS 11+ (Big Sur and later). Apple Silicon and Intel.
 | Gamma (software dimming) | `SetDeviceGammaRamp` (GDI32) |
 | Dark/light mode | Registry (`AppsUseLightTheme` + `SystemUsesLightTheme`) |
 | Volume | PowerShell + COM `IAudioEndpointVolume` |
+| Scaling | Registry DPI (`LogPixels`) — requires logout to apply |
 
 Works on Windows 10 and later.
 
@@ -206,6 +219,8 @@ Works on Windows 10 and later.
 | Gamma (GNOME Wayland) | Falls back to XWayland xrandr | `xrandr` |
 | Dark/light mode | `gsettings` (GNOME), `plasma-apply-colorscheme` (KDE), `xfconf-query` (XFCE) | Desktop-dependent |
 | Volume | `pactl` (PulseAudio/PipeWire) with `amixer` (ALSA) fallback | Pre-installed on most desktops |
+| Scaling (X11) | `xrandr --scale` | `xrandr` (usually pre-installed) |
+| Scaling (Wayland) | `wlr-randr --scale` | `wlr-randr` |
 
 #### Ubuntu / Debian
 
