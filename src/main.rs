@@ -1774,4 +1774,180 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed.is_array());
     }
+
+    #[test]
+    fn serve_set_scale_all_returns_json() {
+        // Calls OS APIs — may fail, just verify valid JSON response
+        let json = serve_set_scale_all(100);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.is_array());
+    }
+
+    #[test]
+    fn serve_set_scale_one_not_found() {
+        let json = serve_set_scale_one("99", 100);
+        assert!(json.contains("error"));
+        assert!(json.contains("not found"));
+    }
+
+    // --- serve_set_one by name ---
+
+    #[test]
+    fn serve_set_one_by_name() {
+        let json = serve_set_one::<MockPlatform>("VX2718-2KPC", 30, "force");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["id"], "2");
+        assert_eq!(parsed["status"], "ok");
+    }
+
+    #[test]
+    fn serve_set_one_by_name_case_insensitive() {
+        let json = serve_set_one::<MockPlatform>("vx2718-2kpc", 30, "force");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["id"], "2");
+    }
+
+    #[test]
+    fn serve_set_one_builtin_by_zero() {
+        let json = serve_set_one::<MockPlatform>("0", 50, "force");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["id"], "builtin");
+        assert_eq!(parsed["status"], "ok");
+    }
+
+    // --- serve_set_all with different modes ---
+
+    #[test]
+    fn serve_set_all_mode_auto() {
+        let json = serve_set_all::<MockPlatform>(50, "auto");
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.len(), 3);
+        for item in &parsed {
+            assert_eq!(item["status"], "ok");
+        }
+    }
+
+    #[test]
+    fn serve_set_all_mode_ddc() {
+        let json = serve_set_all::<MockPlatform>(50, "ddc");
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.len(), 3);
+    }
+
+    // --- DisplayInfo roundtrip serialization ---
+
+    #[test]
+    fn display_info_roundtrip() {
+        let original = make_display("2", "VX2718-2KPC", "external", true);
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: DisplayInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.id, "2");
+        assert_eq!(restored.name, "VX2718-2KPC");
+        assert_eq!(restored.display_type, "external");
+        assert_eq!(restored.brightness, Some(50));
+        assert_eq!(restored.contrast, Some(70));
+        assert_eq!(restored.ddc_supported, true);
+    }
+
+    #[test]
+    fn display_info_roundtrip_nulls() {
+        let original = DisplayInfo {
+            id: "1".into(),
+            name: "Test".into(),
+            display_type: "external".into(),
+            brightness: None,
+            contrast: None,
+            ddc_supported: false,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: DisplayInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.brightness, None);
+        assert_eq!(restored.contrast, None);
+    }
+
+    // --- ScaleInfo ---
+
+    #[test]
+    fn scale_info_builtin() {
+        let info = ScaleInfo { id: BUILTIN_ID.into(), name: "Built-in Display".into(), scale_percent: 200 };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"id\":\"builtin\""));
+        assert!(json.contains("\"scale_percent\":200"));
+    }
+
+    #[test]
+    fn scale_info_array_serializes() {
+        let scales = vec![
+            ScaleInfo { id: BUILTIN_ID.into(), name: "Built-in".into(), scale_percent: 200 },
+            ScaleInfo { id: "1".into(), name: "External".into(), scale_percent: 100 },
+        ];
+        let json = serde_json::to_string(&scales).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 2);
+    }
+
+    // --- clamp_scale edge cases ---
+
+    #[test]
+    fn clamp_scale_at_boundary_minus_one() {
+        assert_eq!(clamp_scale(74), SCALE_MIN);
+        assert_eq!(clamp_scale(301), SCALE_MAX);
+    }
+
+    #[test]
+    fn clamp_scale_u16_max() {
+        assert_eq!(clamp_scale(u16::MAX), SCALE_MAX);
+    }
+
+    // --- VolumeInfo ---
+
+    #[test]
+    fn volume_info_boundary_values() {
+        let v0 = VolumeInfo { volume: 0, muted: false };
+        let v100 = VolumeInfo { volume: 100, muted: false };
+        let json0 = serde_json::to_string(&v0).unwrap();
+        let json100 = serde_json::to_string(&v100).unwrap();
+        assert!(json0.contains("\"volume\":0"));
+        assert!(json100.contains("\"volume\":100"));
+    }
+
+    // --- MockControl edge cases ---
+
+    #[test]
+    fn mock_set_brightness_zero() {
+        let mut ctrl = MockControl { brightness: 50, contrast: 50 };
+        assert!(ctrl.set_brightness(0, "force"));
+        assert_eq!(ctrl.get_brightness(), Some(0));
+    }
+
+    #[test]
+    fn mock_set_brightness_max() {
+        let mut ctrl = MockControl { brightness: 50, contrast: 50 };
+        assert!(ctrl.set_brightness(100, "force"));
+        assert_eq!(ctrl.get_brightness(), Some(100));
+    }
+
+    #[test]
+    fn mock_reset_gamma_does_not_panic() {
+        let ctrl = MockControl { brightness: 50, contrast: 50 };
+        ctrl.reset_gamma(); // should be a no-op
+    }
+
+    // --- serve_get with all three mock displays ---
+
+    #[test]
+    fn serve_get_all_includes_contrast() {
+        let json = serve_get::<MockPlatform>(None);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0]["contrast"], 50);
+        assert_eq!(parsed[2]["contrast"], 60);
+    }
+
+    #[test]
+    fn serve_get_one_by_builtin_string() {
+        let json = serve_get::<MockPlatform>(Some("builtin"));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["id"], "builtin");
+        assert_eq!(parsed["brightness"], 80);
+    }
 }
