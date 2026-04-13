@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "display-dj"
-version = "0.4.1"
+version = "0.4.3"
 dependencies = [
  "ddc",
  "ddc-macos",

@@ -6,7 +6,7 @@ Cross-platform CLI for monitor brightness, display scaling, system volume, and d
 
 Platform-abstracted Rust binary with shared interface (`main.rs`) and platform modules.
 
-The `Platform` trait defines: `enumerate`, `reset_all_gamma`.
+The `Platform` trait defines: `enumerate`, `reset_all_gamma`, `debug_info`.
 The `DisplayControl` trait defines: `get_brightness`, `get_contrast`, `set_brightness`, `set_contrast`, `reset_gamma`.
 
 All displays (built-in + external) are unified under the same interface with consistent IDs: `builtin` (or `0`), `1`, `2`, etc. Display lookup supports both ID and monitor name (case-insensitive).
@@ -26,10 +26,11 @@ Dark mode, volume, and scaling live directly in `main.rs` behind `#[cfg(target_o
 
 1. **Built-in display**: WMI `WmiMonitorBrightness` / `WmiMonitorBrightnessMethods` via PowerShell.
 2. **External DDC/CI**: `ddc-winapi` crate — uses Win32 Dxva2 (`GetMonitorBrightness`/`SetMonitorBrightness`).
-3. **External gamma**: `SetDeviceGammaRamp` via GDI32.
-4. **Dark mode**: Registry keys `AppsUseLightTheme` + `SystemUsesLightTheme` via `reg add` + `WM_SETTINGCHANGE` broadcast for title bar refresh.
-5. **Volume**: PowerShell `AudioDeviceCmdlets` module. Requires one-time setup: `Install-Module -Name AudioDeviceCmdlets`.
-6. **Scaling**: Registry DPI (`LogPixels` + `Win8DpiScaling`). Requires logout to apply.
+3. **Display dedup**: On laptops, the built-in panel can appear in both WMI and `ddc_winapi::Monitor::enumerate()`. The enumerate code checks `MONITORINFOF_PRIMARY` via `GetMonitorInfoW` and skips the primary HMONITOR from DDC when a WMI builtin was already detected. Display names are enriched with PnP device IDs from `EnumDisplayDevicesW` (e.g. `Generic PnP Monitor (DEL40F4)`) to distinguish monitors with the same generic description.
+4. **External gamma**: `SetDeviceGammaRamp` via GDI32.
+5. **Dark mode**: Registry keys `AppsUseLightTheme` + `SystemUsesLightTheme` via `reg add` + `WM_SETTINGCHANGE` broadcast for title bar refresh.
+6. **Volume**: PowerShell `AudioDeviceCmdlets` module. Requires one-time setup: `Install-Module -Name AudioDeviceCmdlets`.
+7. **Scaling**: Registry DPI (`LogPixels` + `Win8DpiScaling`). Requires logout to apply.
 
 ### Linux (`src/linux.rs` + `main.rs`)
 
@@ -79,6 +80,9 @@ display-dj unmute
 display-dj get_scale
 display-dj set_scale_all <percent>
 display-dj set_scale_one <id|name> <percent>
+
+# Diagnostics
+display-dj debug
 
 # Server
 display-dj serve [port]

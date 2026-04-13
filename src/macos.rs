@@ -295,4 +295,77 @@ impl Platform for MacPlatform {
         // Single call resets ALL displays to their ColorSync profiles
         unsafe { CGDisplayRestoreColorSyncSettings(); }
     }
+
+    fn debug_info() -> serde_json::Value {
+        // --- DisplayServices framework ---
+        let ds_loaded = load_display_services().is_some();
+        let builtin_id = find_builtin_display_id();
+
+        // DisplayServices raw brightness for built-in
+        let mut ds_brightness_raw: Option<f32> = None;
+        if let Some(ds) = load_display_services() {
+            if let Some(did) = builtin_id {
+                let mut val: f32 = 0.0;
+                if unsafe { (ds.get)(did, &mut val) } == 0 {
+                    ds_brightness_raw = Some(val);
+                }
+            }
+        }
+
+        // --- CoreGraphics active displays ---
+        let mut cg_displays = Vec::new();
+        unsafe {
+            let mut displays = [0u32; 10];
+            let mut count: u32 = 0;
+            CGGetActiveDisplayList(10, displays.as_mut_ptr(), &mut count);
+            for i in 0..count as usize {
+                let did = displays[i];
+                cg_displays.push(serde_json::json!({
+                    "index": i,
+                    "cg_display_id": did,
+                    "is_builtin": CGDisplayIsBuiltin(did) != 0,
+                }));
+            }
+        }
+
+        // --- DDC monitors via ddc-macos ---
+        let mut ddc_list = Vec::new();
+        let ddc_error: Option<String>;
+        match ddc_macos::Monitor::enumerate() {
+            Ok(monitors) => {
+                ddc_error = None;
+                for (idx, mut mon) in monitors.into_iter().enumerate() {
+                    let name = mon.product_name().unwrap_or_else(|| "unknown".into());
+                    let handle_id = mon.handle().id;
+                    let brightness_raw = mon.get_vcp_feature(VCP_BRIGHTNESS).ok().map(|v| {
+                        serde_json::json!({"current": v.value(), "max": v.maximum()})
+                    });
+                    let contrast_raw = mon.get_vcp_feature(VCP_CONTRAST).ok().map(|v| {
+                        serde_json::json!({"current": v.value(), "max": v.maximum()})
+                    });
+                    ddc_list.push(serde_json::json!({
+                        "index": idx,
+                        "product_name": name,
+                        "cg_display_id": handle_id,
+                        "vcp_brightness": brightness_raw,
+                        "vcp_contrast": contrast_raw,
+                    }));
+                }
+            }
+            Err(e) => {
+                ddc_error = Some(format!("{}", e));
+            }
+        }
+
+        serde_json::json!({
+            "display_services_loaded": ds_loaded,
+            "builtin_cg_display_id": builtin_id,
+            "builtin_brightness_raw": ds_brightness_raw,
+            "cg_display_count": cg_displays.len(),
+            "cg_displays": cg_displays,
+            "ddc_monitor_count": ddc_list.len(),
+            "ddc_monitors": ddc_list,
+            "ddc_enumerate_error": ddc_error,
+        })
+    }
 }

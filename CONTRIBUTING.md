@@ -245,6 +245,41 @@ display-dj theme
 }
 ```
 
+#### `debug`
+
+Dump full diagnostics for all displays, volume, and theme. Runs active tests: sets brightness to 25% on each display (DDC, gamma, force modes), toggles volume (25/100/mute/unmute), toggles theme (dark/light), and restores everything to original state. Also includes raw platform data (HMONITOR details, DDC VCP reads, PnP device IDs, etc.).
+
+```
+display-dj debug
+```
+
+- **stdout**: JSON object with `displays`, `scale`, `platform` (raw data), and `tests` (active results)
+- **stderr**: Progress messages (`Testing display 1...`, etc.)
+- **exit code**: 0
+
+The `tests.displays[]` section shows per-display results:
+
+```json
+{
+  "id": "1",
+  "name": "VX2718-2KPC",
+  "ddc_supported": true,
+  "initial_brightness": 100,
+  "set_brightness_25_ddc": true,
+  "get_after_ddc": 25,
+  "set_brightness_25_gamma": true,
+  "get_after_gamma": 25,
+  "set_brightness_25_force": true,
+  "get_after_force": 25,
+  "restore_brightness": true,
+  "get_after_restore": 100,
+  "set_contrast_50": true,
+  "get_after_contrast_set": 50
+}
+```
+
+Available via HTTP at `GET /debug`.
+
 ### JSON Schemas
 
 #### `DisplayInfo`
@@ -531,6 +566,7 @@ All routes are `GET` with path-based parameters. No query strings, no POST bodie
 | `/theme` | Get current theme | `{theme}` |
 | `/reset` | Reset gamma to defaults | `{status}` |
 | `/health` | Health check | `{status: "ok"}` |
+| `/debug` | Full diagnostics with active tests | `{displays, scale, platform, tests}` |
 
 `<id>` accepts numeric IDs (`0`, `1`, `2`), `builtin`, or monitor names (URL-encoded).
 
@@ -791,6 +827,7 @@ pub trait DisplayControl {
 pub trait Platform {
     fn enumerate() -> Vec<(DisplayInfo, Box<dyn DisplayControl>)>;
     fn reset_all_gamma();
+    fn debug_info() -> serde_json::Value;
 }
 ```
 
@@ -808,6 +845,7 @@ interface DisplayControl {
 interface Platform {
     enumerate(): [DisplayInfo, DisplayControl][];
     resetAllGamma(): void;
+    debugInfo(): object;
 }
 ```
 

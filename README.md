@@ -51,6 +51,7 @@ display-dj unmute                       # Unmute audio
 display-dj get_scale                    # Get display scaling (JSON)
 display-dj set_scale_all <percent>      # Set all displays scaling (75-300)
 display-dj set_scale_one <id> <percent> # Set one display scaling (75-300)
+display-dj debug                        # Dump diagnostics for all displays (JSON)
 display-dj serve [port]                 # Start HTTP server (default: 51337)
 ```
 
@@ -73,6 +74,7 @@ display-dj unmute                       # unmute
 display-dj get_scale                    # see current scale per display
 display-dj set_scale_all 150            # set all displays to 150%
 display-dj set_scale_one builtin 200    # set built-in to 200% (Retina)
+display-dj debug                        # dump full diagnostics (active tests + raw platform data)
 display-dj serve                        # start HTTP server on port 51337
 ```
 
@@ -137,6 +139,7 @@ curl localhost:51337/set_scale_one/builtin/200
 # Utility
 curl localhost:51337/reset
 curl localhost:51337/health
+curl localhost:51337/debug
 ```
 
 ### Response format
@@ -271,6 +274,7 @@ groups | grep i2c
 - DDC brightness is clamped to a minimum of 1 to prevent monitors from turning off or freezing at 0.
 - Built-in display always uses the platform-native API regardless of mode.
 - When two monitors have the same name, name lookup matches the first one. Use numeric IDs to target a specific one.
+- `display-dj debug` runs active diagnostics: sets brightness to 25% and restores, toggles volume and theme, and reports success/failure for each operation alongside raw platform data (HMONITOR details, DDC VCP reads, PnP device IDs, etc.).
 
 ## How It Works
 

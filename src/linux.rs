@@ -417,4 +417,57 @@ impl Platform for LinuxPlatform {
     fn reset_all_gamma() {
         reset_gamma_all(detect_display_server());
     }
+
+    fn debug_info() -> serde_json::Value {
+        let display_server = detect_display_server();
+
+        // --- Backlight (built-in) ---
+        let backlight = find_backlight().map(|bl| {
+            let current_raw = fs::read_to_string(format!("/sys/class/backlight/{}/brightness", bl.device))
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok());
+            serde_json::json!({
+                "device": bl.device,
+                "max_brightness": bl.max,
+                "current_raw": current_raw,
+            })
+        });
+
+        // --- ddcutil version ---
+        let ddcutil_version = Command::new("ddcutil").arg("--version").output().ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).lines().next().map(|s| s.to_string()));
+
+        // --- ddcutil detect (full output) ---
+        let ddcutil_detect = Command::new("ddcutil").args(["detect"]).output().ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+
+        // --- External output names ---
+        let external_outputs = match display_server {
+            DisplayServer::X11 => get_xrandr_external_outputs(),
+            DisplayServer::Wayland => get_wayland_external_outputs(),
+            DisplayServer::Unknown => vec![],
+        };
+
+        // --- Raw xrandr/wlr-randr output ---
+        let randr_output = match display_server {
+            DisplayServer::X11 => Command::new("xrandr").arg("--query").output().ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()),
+            DisplayServer::Wayland => Command::new("wlr-randr").output().ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()),
+            DisplayServer::Unknown => None,
+        };
+
+        serde_json::json!({
+            "display_server": format!("{:?}", display_server),
+            "backlight": backlight,
+            "ddcutil_version": ddcutil_version,
+            "ddcutil_detect_raw": ddcutil_detect,
+            "external_output_names": external_outputs,
+            "randr_output_raw": randr_output,
+        })
+    }
 }

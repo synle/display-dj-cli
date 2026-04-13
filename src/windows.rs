@@ -303,4 +303,136 @@ impl Platform for WinPlatform {
             set_gamma_for_hmonitor(hmonitor, 100);
         }
     }
+
+    fn debug_info() -> serde_json::Value {
+        // --- WMI brightness (built-in panel) ---
+        let wmi_brightness = BuiltinControl::wmi_get();
+
+        // --- HMONITOR enumeration with full details ---
+        let hmonitors = enum_hmonitors();
+        let mut hmon_list = Vec::new();
+        for (idx, &hm) in hmonitors.iter().enumerate() {
+            hmon_list.push(debug_hmonitor(hm, idx));
+        }
+
+        // --- DDC monitors with raw VCP data ---
+        let mut ddc_list = Vec::new();
+        let ddc_error: Option<String>;
+        match ddc_winapi::Monitor::enumerate() {
+            Ok(monitors) => {
+                ddc_error = None;
+                for (idx, mut mon) in monitors.into_iter().enumerate() {
+                    let desc = mon.description();
+                    let brightness_raw = mon.get_vcp_feature(VCP_BRIGHTNESS).ok().map(|v| {
+                        serde_json::json!({"current": v.value(), "max": v.maximum()})
+                    });
+                    let contrast_raw = mon.get_vcp_feature(VCP_CONTRAST).ok().map(|v| {
+                        serde_json::json!({"current": v.value(), "max": v.maximum()})
+                    });
+                    ddc_list.push(serde_json::json!({
+                        "index": idx,
+                        "description": desc,
+                        "vcp_brightness": brightness_raw,
+                        "vcp_contrast": contrast_raw,
+                    }));
+                }
+            }
+            Err(e) => {
+                ddc_error = Some(format!("{}", e));
+            }
+        }
+
+        serde_json::json!({
+            "wmi_brightness": wmi_brightness,
+            "hmonitor_count": hmonitors.len(),
+            "hmonitors": hmon_list,
+            "ddc_monitor_count": ddc_list.len(),
+            "ddc_monitors": ddc_list,
+            "ddc_enumerate_error": ddc_error,
+        })
+    }
+}
+
+/// Dump full details for a single HMONITOR — used by debug_info().
+fn debug_hmonitor(hmonitor: HMONITOR, idx: usize) -> serde_json::Value {
+    unsafe {
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if !GetMonitorInfoW(hmonitor, &mut info.monitorInfo as *mut _).as_bool() {
+            return serde_json::json!({"index": idx, "error": "GetMonitorInfoW failed"});
+        }
+
+        let is_primary = (info.monitorInfo.dwFlags & 1) != 0;
+        let device_name = String::from_utf16_lossy(
+            &info.szDevice[..info.szDevice.iter().position(|&c| c == 0).unwrap_or(info.szDevice.len())]
+        );
+        let rc = info.monitorInfo.rcMonitor;
+
+        // Get adapter info via EnumDisplayDevicesW (first call with device name)
+        let mut adapter_name = String::new();
+        let mut adapter_dd: DISPLAY_DEVICEW = std::mem::zeroed();
+        adapter_dd.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+
+        // Enumerate adapters to find the one matching this device name
+        let mut adapter_idx = 0u32;
+        loop {
+            let mut dd: DISPLAY_DEVICEW = std::mem::zeroed();
+            dd.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+            if !EnumDisplayDevicesW(
+                windows::core::PCWSTR::null(),
+                adapter_idx,
+                &mut dd,
+                0,
+            ).as_bool() {
+                break;
+            }
+            let name = String::from_utf16_lossy(
+                &dd.DeviceName[..dd.DeviceName.iter().position(|&c| c == 0).unwrap_or(dd.DeviceName.len())]
+            );
+            if name == device_name {
+                adapter_name = String::from_utf16_lossy(
+                    &dd.DeviceString[..dd.DeviceString.iter().position(|&c| c == 0).unwrap_or(dd.DeviceString.len())]
+                );
+                adapter_dd = dd;
+                break;
+            }
+            adapter_idx += 1;
+        }
+
+        // Get monitor info (second call: enumerate monitors attached to this adapter)
+        let mut monitor_device_string = String::new();
+        let mut monitor_device_id = String::new();
+        let mut mon_dd: DISPLAY_DEVICEW = std::mem::zeroed();
+        mon_dd.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+        if EnumDisplayDevicesW(
+            windows::core::PCWSTR(adapter_dd.DeviceName.as_ptr()),
+            0,
+            &mut mon_dd,
+            0,
+        ).as_bool() {
+            monitor_device_string = String::from_utf16_lossy(
+                &mon_dd.DeviceString[..mon_dd.DeviceString.iter().position(|&c| c == 0).unwrap_or(mon_dd.DeviceString.len())]
+            );
+            monitor_device_id = String::from_utf16_lossy(
+                &mon_dd.DeviceID[..mon_dd.DeviceID.iter().position(|&c| c == 0).unwrap_or(mon_dd.DeviceID.len())]
+            );
+        }
+
+        serde_json::json!({
+            "index": idx,
+            "device_name": device_name,
+            "is_primary": is_primary,
+            "monitor_rect": {
+                "left": rc.left,
+                "top": rc.top,
+                "right": rc.right,
+                "bottom": rc.bottom,
+                "width": rc.right - rc.left,
+                "height": rc.bottom - rc.top,
+            },
+            "adapter_name": adapter_name,
+            "monitor_device_string": monitor_device_string,
+            "monitor_device_id": monitor_device_id,
+        })
+    }
 }

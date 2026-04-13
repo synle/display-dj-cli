@@ -51,6 +51,7 @@ pub trait DisplayControl {
 pub trait Platform {
     fn enumerate() -> Vec<(DisplayInfo, Box<dyn DisplayControl>)>;
     fn reset_all_gamma();
+    fn debug_info() -> serde_json::Value;
 }
 
 // =========================================================================
@@ -76,6 +77,7 @@ fn usage() {
     eprintln!("  display-dj get_scale                    Get display scaling (JSON)");
     eprintln!("  display-dj set_scale_all <percent>       Set all displays scaling (75-300)");
     eprintln!("  display-dj set_scale_one <id> <percent>  Set one display scaling (75-300)");
+    eprintln!("  display-dj debug                        Dump debug info for all displays (JSON)");
     eprintln!("  display-dj serve [port]                 Start HTTP server (default: 51337)");
     eprintln!();
     eprintln!("Modes: force (default), auto, ddc, gamma");
@@ -169,6 +171,7 @@ fn dispatch<P: Platform>(cmd: &str, args: &[String]) {
             cmd_get::<P>(Some(id));        // Some(id) = filter to this display
         }
         "list" => cmd_list::<P>(),
+        "debug" => cmd_debug::<P>(),
         "reset" => {
             P::reset_all_gamma(); // static method call on the Platform type
             eprintln!("Gamma reset to defaults.");
@@ -322,6 +325,173 @@ fn cmd_list<P: Platform>() {
     println!("{}", serde_json::to_string_pretty(&infos).unwrap());
 }
 
+fn cmd_debug<P: Platform>() {
+    eprintln!("Running diagnostics — brightness, volume, and theme will change momentarily...");
+    eprintln!();
+    let debug = build_debug_info::<P>();
+    println!("{}", serde_json::to_string_pretty(&debug).unwrap());
+}
+
+fn build_debug_info<P: Platform>() -> serde_json::Value {
+    let displays = P::enumerate();
+    let infos: Vec<DisplayInfo> = displays.iter().map(|(info, _)| info.clone()).collect();
+
+    // --- Active tests: exercise each control path and report results ---
+    let mut display_tests = Vec::new();
+    for (info, mut ctrl) in displays {
+        eprintln!("  Testing display {} ({})...", info.id, info.name);
+        display_tests.push(debug_test_display(&info, &mut *ctrl));
+    }
+    eprintln!("  Testing volume...");
+    let volume_tests = debug_test_volume();
+    eprintln!("  Testing theme...");
+    let theme_tests = debug_test_theme();
+    eprintln!();
+
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "displays": infos,
+        "scale": get_all_scales(),
+        "platform": P::debug_info(),
+        "tests": {
+            "displays": display_tests,
+            "volume": volume_tests,
+            "theme": theme_tests,
+        },
+    })
+}
+
+fn serve_debug<P: Platform>() -> String {
+    serde_json::to_string_pretty(&build_debug_info::<P>()).unwrap_or_else(|_| "{}".into())
+}
+
+/// Test brightness get/set for a single display across all modes.
+/// Saves the initial value, runs tests, and restores.
+fn debug_test_display(info: &DisplayInfo, ctrl: &mut dyn DisplayControl) -> serde_json::Value {
+    let initial_brightness = ctrl.get_brightness();
+    let initial_contrast = ctrl.get_contrast();
+
+    // --- Brightness: try each mode at 25%, read back after each ---
+    let set_25_ddc = ctrl.set_brightness(25, "ddc");
+    let get_after_ddc = ctrl.get_brightness();
+
+    let set_25_gamma = ctrl.set_brightness(25, "gamma");
+    let get_after_gamma = ctrl.get_brightness();
+
+    let set_25_force = ctrl.set_brightness(25, "force");
+    let get_after_force = ctrl.get_brightness();
+
+    // Restore brightness to initial (or 100 if we couldn't read it)
+    let restore_val = initial_brightness.unwrap_or(100) as u16;
+    let restore_ok = ctrl.set_brightness(restore_val, "force");
+    ctrl.reset_gamma();
+    let get_after_restore = ctrl.get_brightness();
+
+    // --- Contrast: set to 50, read back, restore ---
+    let set_contrast_50 = ctrl.set_contrast(50);
+    let get_after_contrast_set = ctrl.get_contrast();
+    if let Some(orig) = initial_contrast {
+        ctrl.set_contrast(orig as u16);
+    }
+
+    serde_json::json!({
+        "id": info.id,
+        "name": info.name,
+        "ddc_supported": info.ddc_supported,
+        "initial_brightness": initial_brightness,
+        "initial_contrast": initial_contrast,
+        "set_brightness_25_ddc": set_25_ddc,
+        "get_after_ddc": get_after_ddc,
+        "set_brightness_25_gamma": set_25_gamma,
+        "get_after_gamma": get_after_gamma,
+        "set_brightness_25_force": set_25_force,
+        "get_after_force": get_after_force,
+        "restore_brightness": restore_ok,
+        "get_after_restore": get_after_restore,
+        "set_contrast_50": set_contrast_50,
+        "get_after_contrast_set": get_after_contrast_set,
+    })
+}
+
+/// Test volume get/set/mute. Saves initial state and restores after.
+fn debug_test_volume() -> serde_json::Value {
+    let initial = get_volume();
+
+    let set_25 = set_volume(25);
+    let after_25 = get_volume();
+
+    let set_100 = set_volume(100);
+    let after_100 = get_volume();
+
+    let mute_ok = set_mute(true);
+    let after_mute = get_volume();
+
+    let unmute_ok = set_mute(false);
+    let after_unmute = get_volume();
+
+    // Restore original volume and mute state
+    if let Some(ref orig) = initial {
+        set_volume(orig.volume as u16);
+        if orig.muted { set_mute(true); }
+    }
+
+    let vol_json = |v: &Option<VolumeInfo>| -> serde_json::Value {
+        match v {
+            Some(vi) => serde_json::json!({"volume": vi.volume, "muted": vi.muted}),
+            None => serde_json::Value::Null,
+        }
+    };
+
+    serde_json::json!({
+        "initial": vol_json(&initial),
+        "set_25": set_25,
+        "get_after_25": vol_json(&after_25),
+        "set_100": set_100,
+        "get_after_100": vol_json(&after_100),
+        "mute": mute_ok,
+        "get_after_mute": vol_json(&after_mute),
+        "unmute": unmute_ok,
+        "get_after_unmute": vol_json(&after_unmute),
+    })
+}
+
+/// Test dark/light mode toggle. Saves initial theme and restores after.
+fn debug_test_theme() -> serde_json::Value {
+    let theme_json = |v: Option<bool>| -> serde_json::Value {
+        match v {
+            Some(true) => serde_json::json!("dark"),
+            Some(false) => serde_json::json!("light"),
+            None => serde_json::Value::Null,
+        }
+    };
+
+    let initial = get_dark_mode();
+
+    let set_dark_ok = set_dark_mode(true);
+    let after_dark = get_dark_mode();
+
+    let set_light_ok = set_dark_mode(false);
+    let after_light = get_dark_mode();
+
+    // Restore original theme
+    let restored = if let Some(was_dark) = initial {
+        set_dark_mode(was_dark)
+    } else {
+        false
+    };
+
+    serde_json::json!({
+        "initial": theme_json(initial),
+        "set_dark": set_dark_ok,
+        "get_after_dark": theme_json(after_dark),
+        "set_light": set_light_ok,
+        "get_after_light": theme_json(after_light),
+        "restored": restored,
+    })
+}
+
 /// Keep the process alive when gamma mode is used — gamma tables reset when the process exits.
 /// DDC changes are persistent (stored in monitor firmware), so no keep-alive needed.
 fn maybe_keep_alive(mode: &str) {
@@ -352,7 +522,7 @@ fn cmd_serve<P: Platform>(port: u16) {
     eprintln!();
     eprintln!("Routes:  /list  /get_all  /get_one/<id>  /set_all/<level>  /set_all/<level>/<mode>");
     eprintln!("         /set_one/<id>/<level>  /set_one/<id>/<level>/<mode>");
-    eprintln!("         /dark  /light  /theme  /reset  /health");
+    eprintln!("         /dark  /light  /theme  /reset  /health  /debug");
     eprintln!("         /get_volume  /set_volume/<level>  /mute  /unmute");
     eprintln!("         /get_scale  /set_scale_all/<percent>  /set_scale_one/<id>/<percent>");
     eprintln!();
@@ -396,10 +566,11 @@ fn cmd_serve<P: Platform>(port: u16) {
                     "/dark", "/light", "/theme",
                     "/get_volume", "/set_volume/<level>", "/mute", "/unmute",
                     "/get_scale", "/set_scale_all/<percent>", "/set_scale_one/<id>/<percent>",
-                    "/reset", "/health"
+                    "/reset", "/health", "/debug"
                 ]
             })).unwrap(),
             "health" => r#"{"status":"ok"}"#.to_string(),
+            "debug" => serve_debug::<P>(),
             "list" => serve_list::<P>(),
             "get_all" => serve_get::<P>(None),
             "get_one" => match segments.get(1) {
@@ -1563,6 +1734,9 @@ mod tests {
             ]
         }
         fn reset_all_gamma() {}
+        fn debug_info() -> serde_json::Value {
+            serde_json::json!({"mock": true})
+        }
     }
 
     #[test]
