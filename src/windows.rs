@@ -165,6 +165,49 @@ fn enum_hmonitors() -> Vec<HMONITOR> {
     hmonitors
 }
 
+/// Get the PnP device identifier and primary flag for an HMONITOR.
+/// Returns (device_identifier, is_primary).
+/// The identifier is extracted from the monitor's PnP device ID via EnumDisplayDevicesW
+/// (e.g. "DEL40F4" for a Dell, "GSM5BBF" for an LG), or falls back to the display
+/// device name (e.g. "DISPLAY2").
+fn get_hmonitor_details(hmonitor: HMONITOR) -> (String, bool) {
+    unsafe {
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if !GetMonitorInfoW(hmonitor, &mut info.monitorInfo as *mut _).as_bool() {
+            return (String::new(), false);
+        }
+
+        let is_primary = (info.monitorInfo.dwFlags & 1) != 0; // MONITORINFOF_PRIMARY
+
+        // Call EnumDisplayDevicesW with the adapter device name to get the monitor's PnP ID.
+        let mut dd: DISPLAY_DEVICEW = std::mem::zeroed();
+        dd.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+        if EnumDisplayDevicesW(
+            windows::core::PCWSTR(info.szDevice.as_ptr()),
+            0,
+            &mut dd,
+            0,
+        ).as_bool() {
+            let full_id = String::from_utf16_lossy(
+                &dd.DeviceID[..dd.DeviceID.iter().position(|&c| c == 0).unwrap_or(dd.DeviceID.len())]
+            );
+            // PnP device ID looks like "MONITOR\DEL40F4\{guid}\NNNN" — extract "DEL40F4"
+            let parts: Vec<&str> = full_id.split('\\').collect();
+            if parts.len() >= 2 && !parts[1].is_empty() {
+                return (parts[1].to_string(), is_primary);
+            }
+        }
+
+        // Fallback: extract display number from device name ("\\.\DISPLAY2" -> "DISPLAY2")
+        let device_name = String::from_utf16_lossy(
+            &info.szDevice[..info.szDevice.iter().position(|&c| c == 0).unwrap_or(info.szDevice.len())]
+        );
+        let fallback = device_name.trim_start_matches("\\\\.\\").to_string();
+        (fallback, is_primary)
+    }
+}
+
 // =========================================================================
 // Platform implementation — discovers all displays on Windows
 // =========================================================================
@@ -194,9 +237,29 @@ impl Platform for WinPlatform {
         // --- External displays ---
         // We need both DDC handles (for brightness) and HMONITOR handles (for gamma).
         // These come from different APIs so we zip them together by index.
+        // ddc_winapi::Monitor::enumerate() and enum_hmonitors() both use
+        // EnumDisplayMonitors internally, so indices align (assuming 1 physical per logical).
+        let has_builtin = !result.is_empty();
         let hmonitors = enum_hmonitors();
+        let hmonitor_details: Vec<(String, bool)> = hmonitors.iter()
+            .map(|&hm| get_hmonitor_details(hm))
+            .collect();
+
         if let Ok(monitors) = ddc_winapi::Monitor::enumerate() {
+            let mut ext_id = 1usize;
             for (idx, mut mon) in monitors.into_iter().enumerate() {
+                let hmonitor = hmonitors.get(idx).copied().unwrap_or(HMONITOR::default());
+                let (device_id, is_primary) = hmonitor_details.get(idx)
+                    .cloned()
+                    .unwrap_or((String::new(), false));
+
+                // Skip the primary (built-in) monitor if we already added it via WMI.
+                // On laptops, the built-in panel often appears in both WMI and DDC
+                // enumeration, causing a duplicate "Generic PnP Monitor" entry.
+                if has_builtin && is_primary {
+                    continue;
+                }
+
                 let brightness = mon.get_vcp_feature(VCP_BRIGHTNESS).ok().map(|val| {
                     let max = val.maximum() as f64;
                     let cur = val.value() as f64;
@@ -208,18 +271,26 @@ impl Platform for WinPlatform {
                     if max > 0.0 { (cur / max * 100.0).round() as u32 } else { 50 }
                 });
                 let ddc_supported = brightness.is_some();
-                // .copied() converts Option<&HMONITOR> to Option<HMONITOR> (copies the handle value)
-                let hmonitor = hmonitors.get(idx).copied().unwrap_or(HMONITOR::default());
+
+                // Append device PnP identifier to distinguish monitors with the
+                // same generic description (e.g. "Generic PnP Monitor (DEL40F4)")
+                let base_name = mon.description();
+                let name = if device_id.is_empty() {
+                    base_name
+                } else {
+                    format!("{} ({})", base_name, device_id)
+                };
 
                 let info = DisplayInfo {
-                    id: (idx + 1).to_string(),
-                    name: mon.description(),
+                    id: ext_id.to_string(),
+                    name,
                     display_type: "external".into(),
                     brightness,
                     contrast,
                     ddc_supported,
                 };
                 result.push((info, Box::new(ExternalControl { ddc_monitor: mon, hmonitor, ddc_supported })));
+                ext_id += 1;
             }
         }
 
