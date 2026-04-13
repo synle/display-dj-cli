@@ -27,8 +27,8 @@ Dark mode, volume, and scaling live directly in `main.rs` behind `#[cfg(target_o
 1. **Built-in display**: WMI `WmiMonitorBrightness` / `WmiMonitorBrightnessMethods` via PowerShell.
 2. **External DDC/CI**: `ddc-winapi` crate — uses Win32 Dxva2 (`GetMonitorBrightness`/`SetMonitorBrightness`).
 3. **External gamma**: `SetDeviceGammaRamp` via GDI32.
-4. **Dark mode**: Registry keys `AppsUseLightTheme` + `SystemUsesLightTheme` via `reg add`.
-5. **Volume**: PowerShell + COM `IAudioEndpointVolume` (default audio endpoint).
+4. **Dark mode**: Registry keys `AppsUseLightTheme` + `SystemUsesLightTheme` via `reg add` + `WM_SETTINGCHANGE` broadcast for title bar refresh.
+5. **Volume**: PowerShell `AudioDeviceCmdlets` module. Requires one-time setup: `Install-Module -Name AudioDeviceCmdlets`.
 6. **Scaling**: Registry DPI (`LogPixels` + `Win8DpiScaling`). Requires logout to apply.
 
 ### Linux (`src/linux.rs` + `main.rs`)

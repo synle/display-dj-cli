@@ -832,70 +832,29 @@ fn set_mute(mute: bool) -> bool {
         .unwrap_or(false)
 }
 
-// --- Windows: PowerShell + COM audio ---
+// --- Windows: AudioDeviceCmdlets PowerShell module ---
+// Requires one-time setup: Install-Module -Name AudioDeviceCmdlets
+// https://www.powershellgallery.com/packages/AudioDeviceCmdlets
 
 #[cfg(target_os = "windows")]
 fn get_volume() -> Option<VolumeInfo> {
-    // Use PowerShell with audio COM objects
-    let ps = r#"
-        Add-Type -TypeDefinition @'
-        using System.Runtime.InteropServices;
-        [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        public interface IAudioEndpointVolume {
-            int _0(); int _1(); int _2(); int _3(); int _4(); int _5();
-            int GetMasterVolumeLevelScalar(out float level);
-            int _7(); int _8(); int _9(); int _10(); int _11();
-            int GetMute(out bool mute);
-        }
-        [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        public interface IMMDevice { int Activate(ref System.Guid id, int ctx, System.IntPtr p, out IAudioEndpointVolume ep); }
-        [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        public interface IMMDeviceEnumerator { int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice dev); }
-        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] public class MMDeviceEnumerator {}
-'@
-        $e = New-Object MMDeviceEnumerator
-        $dev = $null; $e.GetDefaultAudioEndpoint(0, 1, [ref]$dev) | Out-Null
-        $id = [Guid]'5CDF2C82-841E-4546-9722-0CF74078229A'
-        $vol = $null; $dev.Activate([ref]$id, 1, [IntPtr]::Zero, [ref]$vol) | Out-Null
-        $level = 0.0; $vol.GetMasterVolumeLevelScalar([ref]$level) | Out-Null
-        $mute = $false; $vol.GetMute([ref]$mute) | Out-Null
-        Write-Output "$([math]::Round($level * 100)),$mute"
-    "#;
     let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", ps])
+        .args(["-NoProfile", "-NonInteractive", "-Command",
+            "Import-Module AudioDeviceCmdlets; $v = Get-AudioDevice -PlaybackVolume; $m = Get-AudioDevice -PlaybackMute; Write-Output \"$v,$m\""])
         .output().ok()?;
     if !output.status.success() { return None; }
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let mut parts = stdout.split(',');
-    let volume: u32 = parts.next()?.parse().ok()?;
+    let volume: f64 = parts.next()?.parse().ok()?;
     let muted = parts.next()?.trim().to_lowercase() == "true";
-    Some(VolumeInfo { volume, muted })
+    Some(VolumeInfo { volume: volume.round() as u32, muted })
 }
 
 #[cfg(target_os = "windows")]
 fn set_volume(level: u16) -> bool {
-    let ps = format!(r#"
-        Add-Type -TypeDefinition @'
-        using System.Runtime.InteropServices;
-        [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        public interface IAudioEndpointVolume {{
-            int _0(); int _1(); int _2(); int _3();
-            int SetMasterVolumeLevelScalar(float level, System.Guid ctx);
-        }}
-        [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        public interface IMMDevice {{ int Activate(ref System.Guid id, int ctx, System.IntPtr p, out IAudioEndpointVolume ep); }}
-        [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        public interface IMMDeviceEnumerator {{ int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice dev); }}
-        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] public class MMDeviceEnumerator {{}}
-'@
-        $e = New-Object MMDeviceEnumerator
-        $dev = $null; $e.GetDefaultAudioEndpoint(0, 1, [ref]$dev) | Out-Null
-        $id = [Guid]'5CDF2C82-841E-4546-9722-0CF74078229A'
-        $vol = $null; $dev.Activate([ref]$id, 1, [IntPtr]::Zero, [ref]$vol) | Out-Null
-        $vol.SetMasterVolumeLevelScalar({:.2}, [Guid]::Empty) | Out-Null
-    "#, level as f64 / 100.0);
     std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+        .args(["-NoProfile", "-NonInteractive", "-Command",
+            &format!("Import-Module AudioDeviceCmdlets; Set-AudioDevice -PlaybackVolume {}", level)])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -903,28 +862,10 @@ fn set_volume(level: u16) -> bool {
 
 #[cfg(target_os = "windows")]
 fn set_mute(mute: bool) -> bool {
-    let ps = format!(r#"
-        Add-Type -TypeDefinition @'
-        using System.Runtime.InteropServices;
-        [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        public interface IAudioEndpointVolume {{
-            int _0(); int _1(); int _2(); int _3(); int _4(); int _5(); int _6(); int _7(); int _8(); int _9(); int _10();
-            int SetMute(bool mute, System.Guid ctx);
-        }}
-        [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        public interface IMMDevice {{ int Activate(ref System.Guid id, int ctx, System.IntPtr p, out IAudioEndpointVolume ep); }}
-        [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        public interface IMMDeviceEnumerator {{ int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice dev); }}
-        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] public class MMDeviceEnumerator {{}}
-'@
-        $e = New-Object MMDeviceEnumerator
-        $dev = $null; $e.GetDefaultAudioEndpoint(0, 1, [ref]$dev) | Out-Null
-        $id = [Guid]'5CDF2C82-841E-4546-9722-0CF74078229A'
-        $vol = $null; $dev.Activate([ref]$id, 1, [IntPtr]::Zero, [ref]$vol) | Out-Null
-        $vol.SetMute(${}, [Guid]::Empty) | Out-Null
-    "#, mute);
+    let val = if mute { "1" } else { "0" };
     std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+        .args(["-NoProfile", "-NonInteractive", "-Command",
+            &format!("Import-Module AudioDeviceCmdlets; Set-AudioDevice -PlaybackMute {}", val)])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
