@@ -33,7 +33,7 @@ impl BuiltinControl {
     /// Set brightness via WMI. value is 0-100.
     fn wmi_set(value: u16) -> bool {
         let cmd = format!(
-            "(Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightnessMethods).WmiSetBrightness(1, {})",
+            "(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1, {})",
             value
         );
         std::process::Command::new("powershell")
