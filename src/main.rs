@@ -611,7 +611,32 @@ fn set_dark_mode(dark: bool) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
-    app && sys // both must succeed
+    if app && sys {
+        // Broadcast WM_SETTINGCHANGE so existing windows refresh their title bars
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", r#"
+                Add-Type -TypeDefinition @'
+                using System;
+                using System.Runtime.InteropServices;
+                public class ThemeBroadcast {
+                    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+                    public static extern IntPtr SendMessageTimeout(
+                        IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
+                        uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+                    public static void Broadcast() {
+                        UIntPtr result;
+                        SendMessageTimeout((IntPtr)0xffff, 0x001A, UIntPtr.Zero,
+                            "ImmersiveColorSet", 0x0002, 5000, out result);
+                    }
+                }
+'@
+                [ThemeBroadcast]::Broadcast()
+            "#])
+            .output();
+        true
+    } else {
+        false
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -816,17 +841,17 @@ fn get_volume() -> Option<VolumeInfo> {
         Add-Type -TypeDefinition @'
         using System.Runtime.InteropServices;
         [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        interface IAudioEndpointVolume {
-            int _0(); int _1(); int _2(); int _3(); int _4(); int _5(); int _6(); int _7(); int _8(); int _9(); int _10(); int _11();
+        public interface IAudioEndpointVolume {
+            int _0(); int _1(); int _2(); int _3(); int _4(); int _5();
             int GetMasterVolumeLevelScalar(out float level);
-            int SetMasterVolumeLevelScalar(float level, System.Guid ctx);
+            int _7(); int _8(); int _9(); int _10(); int _11();
             int GetMute(out bool mute);
         }
         [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        interface IMMDevice { int Activate(ref System.Guid id, int ctx, System.IntPtr p, out IAudioEndpointVolume ep); }
+        public interface IMMDevice { int Activate(ref System.Guid id, int ctx, System.IntPtr p, out IAudioEndpointVolume ep); }
         [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        interface IMMDeviceEnumerator { int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice dev); }
-        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumerator {}
+        public interface IMMDeviceEnumerator { int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice dev); }
+        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] public class MMDeviceEnumerator {}
 '@
         $e = New-Object MMDeviceEnumerator
         $dev = $null; $e.GetDefaultAudioEndpoint(0, 1, [ref]$dev) | Out-Null
@@ -853,16 +878,15 @@ fn set_volume(level: u16) -> bool {
         Add-Type -TypeDefinition @'
         using System.Runtime.InteropServices;
         [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        interface IAudioEndpointVolume {{
-            int _0(); int _1(); int _2(); int _3(); int _4(); int _5(); int _6(); int _7(); int _8(); int _9(); int _10(); int _11();
-            int GetMasterVolumeLevelScalar(out float level);
+        public interface IAudioEndpointVolume {{
+            int _0(); int _1(); int _2(); int _3();
             int SetMasterVolumeLevelScalar(float level, System.Guid ctx);
         }}
         [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        interface IMMDevice {{ int Activate(ref System.Guid id, int ctx, System.IntPtr p, out IAudioEndpointVolume ep); }}
+        public interface IMMDevice {{ int Activate(ref System.Guid id, int ctx, System.IntPtr p, out IAudioEndpointVolume ep); }}
         [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        interface IMMDeviceEnumerator {{ int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice dev); }}
-        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumerator {{}}
+        public interface IMMDeviceEnumerator {{ int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice dev); }}
+        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] public class MMDeviceEnumerator {{}}
 '@
         $e = New-Object MMDeviceEnumerator
         $dev = $null; $e.GetDefaultAudioEndpoint(0, 1, [ref]$dev) | Out-Null
@@ -883,15 +907,15 @@ fn set_mute(mute: bool) -> bool {
         Add-Type -TypeDefinition @'
         using System.Runtime.InteropServices;
         [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        interface IAudioEndpointVolume {{
+        public interface IAudioEndpointVolume {{
             int _0(); int _1(); int _2(); int _3(); int _4(); int _5(); int _6(); int _7(); int _8(); int _9(); int _10();
             int SetMute(bool mute, System.Guid ctx);
         }}
         [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        interface IMMDevice {{ int Activate(ref System.Guid id, int ctx, System.IntPtr p, out IAudioEndpointVolume ep); }}
+        public interface IMMDevice {{ int Activate(ref System.Guid id, int ctx, System.IntPtr p, out IAudioEndpointVolume ep); }}
         [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        interface IMMDeviceEnumerator {{ int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice dev); }}
-        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumerator {{}}
+        public interface IMMDeviceEnumerator {{ int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice dev); }}
+        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] public class MMDeviceEnumerator {{}}
 '@
         $e = New-Object MMDeviceEnumerator
         $dev = $null; $e.GetDefaultAudioEndpoint(0, 1, [ref]$dev) | Out-Null
