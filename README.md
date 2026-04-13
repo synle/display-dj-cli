@@ -1,4 +1,6 @@
-# display-dj
+# display-dj-cli
+
+[![Build Release Binaries](https://github.com/synle/display-dj-cli/actions/workflows/build.yml/badge.svg)](https://github.com/synle/display-dj-cli/actions/workflows/build.yml)
 
 Cross-platform CLI for controlling monitor brightness, display scaling, system volume, and dark mode.
 
@@ -291,3 +293,7 @@ groups | grep i2c
 | **DDC/CI** | Sends I2C commands to the monitor to adjust the actual backlight | Best quality, but not all monitors support it |
 | **Gamma** | Adjusts the GPU's color output curve to simulate dimming | Works everywhere, but reduces color range |
 | **Force** | Applies both DDC + gamma together | Most consistent across mixed monitor setups |
+
+## Related
+
+**[display-dj](https://github.com/synle/display-dj)** — A cross-platform desktop app (Tauri + React) that uses this CLI as its backend sidecar. Provides a system tray popup with brightness sliders, dark mode toggle, volume control, night mode scheduling, and global keyboard shortcuts. Available for macOS, Windows, and Linux.
