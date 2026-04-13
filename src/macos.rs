@@ -38,9 +38,12 @@ extern "C" {
 type GetBrightnessFn = unsafe extern "C" fn(u32, *mut f32) -> i32;
 type SetBrightnessFn = unsafe extern "C" fn(u32, f32) -> i32;
 
+/// Holds resolved function pointers from the DisplayServices private framework.
+/// Loaded once at startup via dlopen/dlsym. If loading fails, there's no built-in
+/// brightness control (e.g., on a Mac desktop with no built-in display).
 struct DisplayServicesFns {
-    get: GetBrightnessFn,
-    set: SetBrightnessFn,
+    get: GetBrightnessFn, // DisplayServicesGetBrightness(displayID, &mut brightness) -> status
+    set: SetBrightnessFn, // DisplayServicesSetBrightness(displayID, brightness) -> status
 }
 
 /// Try to load DisplayServices.framework and resolve the brightness functions.
@@ -85,12 +88,17 @@ fn find_builtin_display_id() -> Option<u32> {
 // Built-in display — uses DisplayServices for direct hardware brightness
 // =========================================================================
 
+/// Built-in (laptop/iMac) display controller.
+/// Uses the private DisplayServices framework for direct hardware backlight control.
+/// The display_id is a CoreGraphics display ID (from CGGetActiveDisplayList).
 struct BuiltinControl {
-    display_id: u32,
-    ds: DisplayServicesFns,
+    display_id: u32,          // CoreGraphics display ID for the built-in panel
+    ds: DisplayServicesFns,   // resolved function pointers from DisplayServices.framework
 }
 
-// impl Trait for Struct = "BuiltinControl fulfills the DisplayControl interface"
+/// DisplayControl implementation for built-in displays.
+/// Mode parameter is ignored — built-in always uses DisplayServices (no DDC, no gamma).
+/// Brightness is a 0.0–1.0 float internally, exposed as 0–100 percentage.
 impl DisplayControl for BuiltinControl {
     fn get_brightness(&mut self) -> Option<u32> {
         let mut val: f32 = 0.0;
@@ -122,16 +130,23 @@ impl DisplayControl for BuiltinControl {
 // External monitor — DDC/CI for hardware control, CoreGraphics for gamma
 // =========================================================================
 
+/// External monitor controller for macOS.
+/// Combines two APIs: ddc-macos crate (hardware DDC/CI over IOKit I2C) and
+/// CoreGraphics gamma formula (software brightness). DDC uses IOAVServiceWriteI2C
+/// on Apple Silicon or IOI2CSendRequest on Intel Macs.
 struct ExternalControl {
     ddc_monitor: ddc_macos::Monitor, // from the ddc-macos crate — wraps IOKit I2C
-    cg_display_id: u32,              // CoreGraphics ID for gamma control
-    ddc_supported: bool,
+    cg_display_id: u32,              // CoreGraphics display ID for gamma control
+    ddc_supported: bool,             // true if initial VCP brightness read succeeded
 }
 
 /// DDC retry settings for stubborn monitors.
-const DDC_WRITE_RETRIES: u32 = 5;
+/// Some monitors (e.g., Acer XZ322QU V3) have flaky I2C buses that return
+/// checksum errors intermittently. Retrying with delays between attempts
+/// significantly improves reliability.
+const DDC_WRITE_RETRIES: u32 = 5;   // writes need more retries than reads
 const DDC_READ_RETRIES: u32 = 3;
-const DDC_RETRY_DELAY_MS: u64 = 50;
+const DDC_RETRY_DELAY_MS: u64 = 50; // ms between attempts — gives I2C bus time to settle
 
 /// Try reading a VCP feature with retries and delays between attempts.
 fn ddc_read_with_retry(mon: &mut ddc_macos::Monitor, vcp: u8) -> Option<(u16, u16)> {
@@ -163,6 +178,9 @@ fn ddc_write_with_retry(mon: &mut ddc_macos::Monitor, vcp: u8, value: u16) -> bo
     false
 }
 
+/// DisplayControl implementation for external monitors on macOS.
+/// Supports DDC/CI (hardware), CoreGraphics gamma (software), or both stacked.
+/// DDC reads/writes use retry logic for monitors with flaky I2C communication.
 impl DisplayControl for ExternalControl {
     fn get_brightness(&mut self) -> Option<u32> {
         ddc_read_with_retry(&mut self.ddc_monitor, VCP_BRIGHTNESS).map(|(cur, max)| {
@@ -225,9 +243,17 @@ fn set_cg_gamma(display_id: u32, brightness: u32) {
 // Platform implementation — discovers all displays on this Mac
 // =========================================================================
 
+/// macOS platform implementation.
+/// Discovers displays by combining DisplayServices (built-in) with ddc-macos (external).
+/// Unlike Windows, macOS doesn't have a dedup problem — DisplayServices and DDC enumerate
+/// from different sources (private framework vs IOKit), and the built-in panel only appears
+/// in DisplayServices while DDC only lists external monitors with I2C interfaces.
 pub struct MacPlatform;
 
 impl Platform for MacPlatform {
+    /// Enumerate all displays on this Mac.
+    /// Built-in: DisplayServices private framework (if available).
+    /// External: ddc-macos crate via IOKit I2C services.
     fn enumerate() -> Vec<(DisplayInfo, Box<dyn DisplayControl>)> {
         let mut result: Vec<(DisplayInfo, Box<dyn DisplayControl>)> = Vec::new();
 
@@ -291,11 +317,15 @@ impl Platform for MacPlatform {
         result
     }
 
+    /// Reset gamma on all displays to their ColorSync profiles.
+    /// A single CoreGraphics call handles every display at once.
     fn reset_all_gamma() {
-        // Single call resets ALL displays to their ColorSync profiles
         unsafe { CGDisplayRestoreColorSyncSettings(); }
     }
 
+    /// Dump raw platform diagnostics for the `debug` command.
+    /// Returns DisplayServices availability, CoreGraphics display list with IDs,
+    /// and raw DDC VCP reads from each external monitor.
     fn debug_info() -> serde_json::Value {
         // --- DisplayServices framework ---
         let ds_loaded = load_display_services().is_some();

@@ -45,6 +45,27 @@ Dark mode, volume, and scaling live directly in `main.rs` behind `#[cfg(target_o
 9. **Scaling (X11)**: `xrandr --scale`. Uses inverse scale (100%/target) since xrandr scales the framebuffer.
 10. **Scaling (Wayland)**: `wlr-randr --scale`. Direct scale factor.
 
+### Windows display dedup (builtin duplicate elimination)
+
+On Windows laptops, the built-in panel often appears in **both** the WMI brightness API and the `ddc_winapi::Monitor::enumerate()` DDC enumeration. Without dedup, the builtin shows up twice: once as a WMI-backed "Built-in Display" and once as a DDC-listed "Generic PnP Monitor" (typically with null VCP brightness since the laptop panel doesn't respond to DDC commands).
+
+**The fix** (`windows.rs`, `enumerate()`):
+
+1. First, check if WMI brightness is available (`BuiltinControl::wmi_get()`). If so, add the built-in display and set `has_builtin = true`.
+2. When iterating DDC monitors, pair each with its HMONITOR handle (from `EnumDisplayMonitors`).
+3. For each DDC monitor, call `get_hmonitor_details()` to get the `is_primary` flag (`MONITORINFOF_PRIMARY`).
+4. **Skip any DDC monitor that is primary when `has_builtin` is true** — this is the duplicate.
+
+**How to verify via `debug` output:**
+
+- `platform.wmi_brightness` is non-null → WMI detected a built-in panel.
+- `platform.ddc_monitor_count` may be higher than the final `displays` count — that's expected.
+- `platform.hmonitors[N].is_primary == true` identifies which HMONITOR is the builtin.
+- The DDC monitor at the same index as the primary HMONITOR typically has `vcp_brightness: null` (laptop panels don't speak DDC).
+- The final `displays` array should have exactly one `"builtin"` entry and no duplicate.
+
+**PnP device ID enrichment:** External monitors with the same generic description (e.g., "Generic PnP Monitor") are disambiguated by appending the PnP device identifier from `EnumDisplayDevicesW`. The device ID is extracted from the monitor's hardware path (e.g., `MONITOR\DEL40F4\{guid}\NNNN` → `DEL40F4`), giving names like `"Generic PnP Monitor (DEL40F4)"`.
+
 ### Known behaviors
 
 - Some monitors (e.g., Acer XZ322QU V3) return DDC/CI checksum errors on reads and silently ignore writes. These need gamma fallback.

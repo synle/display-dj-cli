@@ -726,6 +726,80 @@ For most apps, shelling out to the binary is the right choice. It's simple, the 
 
 ---
 
+## Troubleshooting & Platform Gotchas
+
+### Windows: duplicate built-in display
+
+**Problem:** On laptops, the built-in panel appears in both WMI (`WmiMonitorBrightness`) and the DDC enumeration (`ddc_winapi::Monitor::enumerate()`). Without handling this, `list` shows two entries for the same display — one as `"builtin"` and one as an external `"Generic PnP Monitor"`.
+
+**Root cause:** `ddc_winapi::Monitor::enumerate()` uses `EnumDisplayMonitors` internally, which returns all HMONITOR handles including the primary (built-in) monitor. The DDC APIs then try to open a physical monitor handle for each, including the laptop panel — even though the panel doesn't speak DDC/CI.
+
+**Fix:** In `windows.rs` `WinPlatform::enumerate()`, after adding the WMI-backed builtin, the DDC loop checks each monitor's `is_primary` flag (from `GetMonitorInfoW` → `MONITORINFOF_PRIMARY`). If a WMI builtin was already added **and** the DDC monitor maps to the primary HMONITOR, it's skipped.
+
+**How to verify:** Run `display-dj debug` and check:
+- `platform.wmi_brightness` — non-null means WMI detected a builtin
+- `platform.hmonitors[N].is_primary` — identifies which HMONITOR is the laptop panel
+- `platform.ddc_monitors[N].vcp_brightness` — typically `null` for the laptop panel's DDC entry
+- `displays` array — should have exactly one `"builtin"` entry, no duplicate
+
+**Example debug output (healthy laptop with one external):**
+```json
+{
+  "displays": [
+    {"id": "builtin", "display_type": "builtin", "ddc_supported": false},
+    {"id": "1", "display_type": "external", "name": "Generic PnP Monitor (APT1222)"}
+  ],
+  "platform": {
+    "wmi_brightness": 72,
+    "ddc_monitor_count": 2,
+    "hmonitors": [
+      {"index": 0, "is_primary": true, "monitor_device_id": "MONITOR\\SDC416B\\..."},
+      {"index": 1, "is_primary": false, "monitor_device_id": "MONITOR\\APT1222\\..."}
+    ]
+  }
+}
+```
+
+Here `ddc_monitor_count` is 2 (DDC sees both monitors), but the final `displays` has only 2 entries because the primary DDC entry was deduped against the WMI builtin.
+
+### Windows: PnP device ID enrichment
+
+Multiple monitors may report the same generic description ("Generic PnP Monitor"). To distinguish them, `get_hmonitor_details()` calls `EnumDisplayDevicesW` to get each monitor's PnP device ID (e.g., `DEL40F4` for Dell, `APT1222` for a specific model). This is appended to the name: `"Generic PnP Monitor (DEL40F4)"`.
+
+### DDC/CI quirks
+
+- **Checksum errors on reads:** Some monitors (e.g., Acer XZ322QU V3) return DDC/CI checksum errors. The macOS module retries reads up to 3 times and writes up to 5 times with 50ms delays. The `force` mode stacks DDC + gamma as a reliable fallback.
+- **Brightness 0 = standby:** Setting DDC brightness to 0 can cause monitors to enter standby or freeze. All platforms clamp the minimum DDC value to 1.
+- **VCP null ≠ broken:** `vcp_brightness: null` in debug output means the DDC read failed — common for laptop panels (which use backlight APIs, not DDC) and monitors with flaky I2C buses. Gamma fallback still works.
+
+### Gamma behavior differences
+
+| Platform | Gamma persistence | Reset mechanism |
+|----------|-------------------|-----------------|
+| macOS (CoreGraphics) | Resets when process exits | `CGDisplayRestoreColorSyncSettings()` |
+| Windows (GDI32) | Resets when process exits | `SetDeviceGammaRamp` with identity ramp |
+| Linux X11 (xrandr) | **Persists** after exit | `xrandr --output <name> --brightness 1.0` |
+| Linux Wayland (wlr-randr) | **Persists** after exit | `wlr-randr --output <name> --brightness 1.0` |
+
+This is why macOS and Windows use `maybe_keep_alive()` — the process must stay alive to hold the gamma state. On Linux, gamma changes stick and the process can exit.
+
+### Interpreting `debug` output
+
+The `display-dj debug` command runs active tests and dumps raw platform data. Key sections:
+
+| Section | What it contains |
+|---------|-----------------|
+| `displays` | Final enumerated displays (after dedup) with initial brightness/contrast reads |
+| `platform` | Raw platform data: HMONITOR details (Windows), CoreGraphics displays (macOS), sysfs backlight + ddcutil output (Linux) |
+| `tests.displays` | Per-display results: sets brightness to 25% via each mode (DDC, gamma, force), reads back, restores original |
+| `tests.volume` | Volume get/set/mute/unmute cycle with restore |
+| `tests.theme` | Dark/light toggle cycle with restore |
+| `scale` | Current per-display scale factors |
+
+**All tests are non-destructive** — they save initial state, run tests, and restore. If a test field is `null` or `false`, that feature is unavailable on that display/platform.
+
+---
+
 ## Rust Syntax Guide for Node/JS Developers
 
 This guide explains the Rust patterns used in this codebase using Node.js equivalents.

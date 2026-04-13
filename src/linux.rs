@@ -39,9 +39,12 @@ fn detect_display_server() -> DisplayServer {
 // /sys/class/backlight/ exposes one directory per backlight device.
 // =========================================================================
 
+/// Info about a sysfs backlight device (one per built-in panel).
+/// The max brightness varies wildly by driver: Intel uses 24000, some AMD use 255.
+/// We normalize to 0-100% in the DisplayControl implementation.
 struct BacklightInfo {
-    device: String, // e.g., "intel_backlight", "amdgpu_bl0"
-    max: u32,       // max brightness value (varies by driver, e.g., 255 or 24000)
+    device: String, // sysfs device name (e.g., "intel_backlight", "amdgpu_bl0")
+    max: u32,       // max brightness value from /sys/class/backlight/<device>/max_brightness
 }
 
 /// Find the first working backlight device in /sys/class/backlight/.
@@ -65,10 +68,16 @@ fn find_backlight() -> Option<BacklightInfo> {
     None
 }
 
+/// Built-in (laptop) display controller for Linux.
+/// Reads/writes brightness via sysfs (/sys/class/backlight/) with brightnessctl
+/// as a fallback when direct sysfs writes require elevated permissions.
 struct BuiltinControl {
     backlight: BacklightInfo,
 }
 
+/// DisplayControl implementation for the built-in panel.
+/// Mode parameter is ignored — built-in always uses sysfs/brightnessctl.
+/// Brightness is stored as a raw driver value internally, converted to/from 0-100%.
 impl DisplayControl for BuiltinControl {
     fn get_brightness(&mut self) -> Option<u32> {
         // Read the raw value from sysfs and convert to 0-100 percentage
@@ -102,13 +111,21 @@ impl DisplayControl for BuiltinControl {
 // Unlike macOS/Windows, Linux uses CLI tools instead of native APIs.
 // =========================================================================
 
+/// External monitor controller for Linux.
+/// Uses ddcutil CLI for DDC/CI (hardware brightness) and xrandr/wlr-randr for
+/// gamma (software brightness). Unlike macOS/Windows which use native APIs,
+/// Linux relies on external CLI tools for both DDC and gamma.
 struct ExternalControl {
     display_num: u32,                // ddcutil's display number (1-based)
     output_name: Option<String>,     // xrandr/wlr-randr output name (e.g., "HDMI-1")
-    display_server: DisplayServer,
-    ddc_supported: bool,
+    display_server: DisplayServer,   // X11 or Wayland — determines which gamma tool to use
+    ddc_supported: bool,             // true if initial ddcutil VCP read succeeded
 }
 
+/// DisplayControl implementation for external monitors on Linux.
+/// DDC operations shell out to `ddcutil`. Gamma operations use `xrandr` (X11),
+/// `wlr-randr` (Wayland/wlroots), `wl-gammarelay-rs` (Wayland/D-Bus), or
+/// XWayland xrandr as fallbacks.
 impl DisplayControl for ExternalControl {
     fn get_brightness(&mut self) -> Option<u32> {
         read_ddcutil_vcp(self.display_num, VCP_BRIGHTNESS)
@@ -265,7 +282,9 @@ fn push_monitor(
 // =========================================================================
 
 /// Map a ddcutil display number to an X11/Wayland output name (e.g., "HDMI-1").
-/// We filter out built-in outputs (eDP/LVDS) so external display numbering matches.
+/// We filter out built-in outputs (eDP = embedded DisplayPort, LVDS = legacy laptop)
+/// so external display numbering matches between ddcutil and xrandr/wlr-randr.
+/// This mapping is needed because ddcutil and xrandr use different enumeration orders.
 fn get_output_name(display_num: u32, server: DisplayServer) -> Option<String> {
     let outputs = match server {
         DisplayServer::X11 => get_xrandr_external_outputs(),
@@ -382,9 +401,17 @@ fn reset_gamma_all(server: DisplayServer) {
 // Platform implementation — discovers all displays on Linux
 // =========================================================================
 
+/// Linux platform implementation.
+/// Discovers displays by combining sysfs backlight (built-in) with ddcutil (external).
+/// No dedup needed — sysfs and ddcutil enumerate from completely different sources
+/// (kernel backlight interface vs I2C bus), and eDP/LVDS outputs are filtered out
+/// of the xrandr/wlr-randr external output list.
 pub struct LinuxPlatform;
 
 impl Platform for LinuxPlatform {
+    /// Enumerate all displays on this Linux machine.
+    /// Built-in: /sys/class/backlight/ sysfs interface.
+    /// External: ddcutil CLI via i2c-dev kernel module.
     fn enumerate() -> Vec<(DisplayInfo, Box<dyn DisplayControl>)> {
         let mut result: Vec<(DisplayInfo, Box<dyn DisplayControl>)> = Vec::new();
         let display_server = detect_display_server();
@@ -414,10 +441,16 @@ impl Platform for LinuxPlatform {
         result
     }
 
+    /// Reset gamma on all external outputs to 100% (no dimming).
+    /// Unlike macOS (single CoreGraphics call), Linux must reset each output individually
+    /// via xrandr or wlr-randr.
     fn reset_all_gamma() {
         reset_gamma_all(detect_display_server());
     }
 
+    /// Dump raw platform diagnostics for the `debug` command.
+    /// Returns display server type, sysfs backlight info, ddcutil version and detect
+    /// output, external output names, and raw xrandr/wlr-randr output.
     fn debug_info() -> serde_json::Value {
         let display_server = detect_display_server();
 

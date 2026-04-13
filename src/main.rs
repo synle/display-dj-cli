@@ -58,6 +58,8 @@ pub trait Platform {
 // CLI — all human-readable output goes to stderr, JSON goes to stdout
 // =========================================================================
 
+/// Print CLI usage/help text to stderr.
+/// Lists all commands, modes, and platform-specific dependency info.
 fn usage() {
     eprintln!("display-dj v{} — cross-platform display brightness control\n", env!("CARGO_PKG_VERSION"));
     eprintln!("Usage:");
@@ -239,6 +241,8 @@ fn matches_display(info: &DisplayInfo, query: &str) -> bool {
     info.id == query || info.name.to_lowercase() == query.to_lowercase()
 }
 
+/// Set brightness on all displays. Enumerates, sets each, prints status to stderr.
+/// Calls maybe_keep_alive() at the end to hold gamma state if needed.
 fn cmd_set_all<P: Platform>(level: u16, mode: &str) {
     let displays = P::enumerate();
     eprintln!("Setting all {} display(s) to {}% [mode={}]\n", displays.len(), level, mode);
@@ -257,6 +261,8 @@ fn cmd_set_all<P: Platform>(level: u16, mode: &str) {
     maybe_keep_alive(mode);
 }
 
+/// Set brightness on a single display by ID or name.
+/// Exits with code 1 if the display is not found (prints available displays).
 fn cmd_set_one<P: Platform>(id: &str, level: u16, mode: &str) {
     let displays = P::enumerate();
     // Clone display infos before the loop consumes the Vec — we need them for error messages.
@@ -280,7 +286,10 @@ fn cmd_set_one<P: Platform>(id: &str, level: u16, mode: &str) {
     std::process::exit(1);
 }
 
-// Option<&String> = "maybe a reference to a String" — None means get all displays.
+/// Get live brightness/contrast for displays. Outputs JSON to stdout.
+/// If filter_id is Some, returns a single DisplayInfo object for that display.
+/// If filter_id is None, returns a JSON array of all displays.
+/// Re-reads brightness/contrast from hardware (not cached values from enumerate).
 fn cmd_get<P: Platform>(filter_id: Option<&String>) {
     let displays = P::enumerate();
     let all_infos: Vec<DisplayInfo> = displays.iter().map(|(info, _)| info.clone()).collect();
@@ -316,6 +325,9 @@ fn cmd_get<P: Platform>(filter_id: Option<&String>) {
     }
 }
 
+/// List all detected displays without re-reading live values.
+/// Outputs a JSON array of DisplayInfo to stdout. Brightness/contrast values
+/// come from the initial enumerate() call, not fresh hardware reads.
 fn cmd_list<P: Platform>() {
     let displays = P::enumerate();
     // .into_iter() consumes the Vec (moves ownership — displays is gone after this).
@@ -325,6 +337,9 @@ fn cmd_list<P: Platform>() {
     println!("{}", serde_json::to_string_pretty(&infos).unwrap());
 }
 
+/// Run full diagnostics: enumerate displays, exercise each control path
+/// (DDC, gamma, force), test volume and theme, then restore everything.
+/// Outputs a comprehensive JSON report to stdout.
 fn cmd_debug<P: Platform>() {
     eprintln!("Running diagnostics — brightness, volume, and theme will change momentarily...");
     eprintln!();
@@ -332,6 +347,8 @@ fn cmd_debug<P: Platform>() {
     println!("{}", serde_json::to_string_pretty(&debug).unwrap());
 }
 
+/// Build the full debug JSON object. Separated from cmd_debug so it can also
+/// be called by the HTTP server's /debug endpoint without printing to stderr.
 fn build_debug_info<P: Platform>() -> serde_json::Value {
     let displays = P::enumerate();
     let infos: Vec<DisplayInfo> = displays.iter().map(|(info, _)| info.clone()).collect();
@@ -363,6 +380,7 @@ fn build_debug_info<P: Platform>() -> serde_json::Value {
     })
 }
 
+/// HTTP handler for /debug — builds the debug report and returns it as a JSON string.
 fn serve_debug<P: Platform>() -> String {
     serde_json::to_string_pretty(&build_debug_info::<P>()).unwrap_or_else(|_| "{}".into())
 }
@@ -392,9 +410,8 @@ fn debug_test_display(info: &DisplayInfo, ctrl: &mut dyn DisplayControl) -> serd
     // --- Contrast: set to 50, read back, restore ---
     let set_contrast_50 = ctrl.set_contrast(50);
     let get_after_contrast_set = ctrl.get_contrast();
-    if let Some(orig) = initial_contrast {
-        ctrl.set_contrast(orig as u16);
-    }
+    let restore_contrast_val = initial_contrast.unwrap_or(20) as u16;
+    ctrl.set_contrast(restore_contrast_val);
 
     serde_json::json!({
         "id": info.id,
@@ -509,6 +526,9 @@ fn maybe_keep_alive(mode: &str) {
 // Binds to 127.0.0.1 only (localhost, not exposed to network).
 // =========================================================================
 
+/// Start the HTTP server on localhost. Handles one request at a time (single-threaded).
+/// The server keeps the process alive, which is essential for gamma persistence on macOS/Windows.
+/// All routes are GET with path-based parameters. Responses are JSON with CORS headers.
 fn cmd_serve<P: Platform>(port: u16) {
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
@@ -634,6 +654,8 @@ fn cmd_serve<P: Platform>(port: u16) {
     }
 }
 
+/// Write a minimal HTTP/1.1 response with JSON content type and CORS headers.
+/// Connection: close ensures the client doesn't wait for more data.
 fn write_http(stream: &mut std::net::TcpStream, status: u16, body: &str) -> std::io::Result<()> {
     use std::io::Write;
     let reason = match status { 200 => "OK", 400 => "Bad Request", 404 => "Not Found", _ => "Error" };
@@ -644,12 +666,16 @@ fn write_http(stream: &mut std::net::TcpStream, status: u16, body: &str) -> std:
     )
 }
 
+/// HTTP handler for /list — returns all displays as a JSON array (no live re-reads).
 fn serve_list<P: Platform>() -> String {
     let displays = P::enumerate();
     let infos: Vec<DisplayInfo> = displays.into_iter().map(|(info, _)| info).collect();
     serde_json::to_string(&infos).unwrap_or_else(|_| "[]".into())
 }
 
+/// HTTP handler for /get_all and /get_one/<id>.
+/// Re-reads live brightness/contrast from hardware. Returns JSON array (get_all)
+/// or single object (get_one). Returns error JSON if display not found.
 fn serve_get<P: Platform>(filter_id: Option<&str>) -> String {
     let displays = P::enumerate();
     let mut results: Vec<DisplayInfo> = Vec::new();
@@ -672,6 +698,8 @@ fn serve_get<P: Platform>(filter_id: Option<&str>) -> String {
     }
 }
 
+/// HTTP handler for /set_all/<level>[/<mode>].
+/// Sets brightness on all displays and returns per-display status as JSON array.
 fn serve_set_all<P: Platform>(level: u16, mode: &str) -> String {
     let displays = P::enumerate();
     let mut results: Vec<serde_json::Value> = Vec::new();
@@ -686,6 +714,9 @@ fn serve_set_all<P: Platform>(level: u16, mode: &str) -> String {
     serde_json::to_string(&results).unwrap_or_else(|_| "[]".into())
 }
 
+/// HTTP handler for /set_one/<id>/<level>[/<mode>].
+/// Sets brightness on a single display by ID or name. Returns status JSON
+/// or error JSON if display not found.
 fn serve_set_one<P: Platform>(id: &str, level: u16, mode: &str) -> String {
     let displays = P::enumerate();
     for (info, mut ctrl) in displays {
@@ -707,6 +738,8 @@ fn serve_set_one<P: Platform>(id: &str, level: u16, mode: &str) -> String {
 // is simple enough to live in main.rs behind conditional compilation.
 // =========================================================================
 
+/// CLI handler for `dark` and `light` commands.
+/// Prints status to stderr and exits with code 1 on failure.
 fn cmd_theme(dark: bool) {
     // if-as-expression: returns a value like JS ternary (condition ? a : b)
     let label = if dark { "dark" } else { "light" };
@@ -718,6 +751,7 @@ fn cmd_theme(dark: bool) {
     }
 }
 
+/// CLI handler for `theme` command — outputs {"theme": "dark"|"light"} to stdout.
 fn cmd_get_theme() {
     // Inline struct — only used here, so defined locally.
     // #[derive(Serialize)] makes it JSON-serializable.
@@ -735,8 +769,10 @@ fn cmd_get_theme() {
     }
 }
 
-// --- macOS: AppleScript via osascript ---
+// --- macOS dark mode: AppleScript via osascript ---
 
+/// Set dark/light mode on macOS via System Events AppleScript.
+/// Toggles the system-wide appearance preference.
 #[cfg(target_os = "macos")]
 fn set_dark_mode(dark: bool) -> bool {
     let val = if dark { "true" } else { "false" };
@@ -752,6 +788,8 @@ fn set_dark_mode(dark: bool) -> bool {
         .unwrap_or(false)
 }
 
+/// Get current dark mode state on macOS. Returns Some(true) for dark, Some(false)
+/// for light, None if detection fails.
 #[cfg(target_os = "macos")]
 fn get_dark_mode() -> Option<bool> {
     let output = std::process::Command::new("osascript")
@@ -763,8 +801,11 @@ fn get_dark_mode() -> Option<bool> {
     Some(val == "true")
 }
 
-// --- Windows: registry keys control app and system theme ---
+// --- Windows dark mode: registry keys + WM_SETTINGCHANGE broadcast ---
 
+/// Set dark/light mode on Windows by writing to the Personalize registry keys.
+/// Sets both AppsUseLightTheme (app chrome) and SystemUsesLightTheme (taskbar/start menu).
+/// Broadcasts WM_SETTINGCHANGE so already-open windows refresh their title bars.
 #[cfg(target_os = "windows")]
 fn set_dark_mode(dark: bool) -> bool {
     // Windows uses 0=dark, 1=light (inverted from what you'd expect)
@@ -810,6 +851,8 @@ fn set_dark_mode(dark: bool) -> bool {
     }
 }
 
+/// Get current dark mode state on Windows by reading the registry.
+/// AppsUseLightTheme: 0 = dark mode ON, 1 = light mode (note: inverted naming).
 #[cfg(target_os = "windows")]
 fn get_dark_mode() -> Option<bool> {
     let output = std::process::Command::new("reg")
@@ -828,8 +871,11 @@ fn get_dark_mode() -> Option<bool> {
     }
 }
 
-// --- Linux: tries desktop environments in order (GNOME -> KDE -> XFCE) ---
+// --- Linux dark mode: tries desktop environments in order (GNOME -> KDE -> XFCE) ---
 
+/// Set dark/light mode on Linux. Tries GNOME (gsettings color-scheme + gtk-theme),
+/// KDE (plasma-apply-colorscheme), and XFCE (xfconf-query) in order.
+/// Returns true on first success, false if no supported DE was found.
 #[cfg(target_os = "linux")]
 fn set_dark_mode(dark: bool) -> bool {
     let gtk_theme = if dark { "Adwaita-dark" } else { "Adwaita" };
@@ -873,6 +919,8 @@ fn set_dark_mode(dark: bool) -> bool {
     false // no supported desktop environment found
 }
 
+/// Get current dark mode state on Linux. Tries GNOME color-scheme, GNOME gtk-theme
+/// (fallback), and KDE color scheme in order. Returns None if no DE detected.
 #[cfg(target_os = "linux")]
 fn get_dark_mode() -> Option<bool> {
     // GNOME: check color-scheme first (more reliable than theme name)
@@ -917,12 +965,14 @@ fn get_dark_mode() -> Option<bool> {
 // Cross-platform: macOS (osascript), Windows (PowerShell), Linux (pactl/amixer).
 // =========================================================================
 
+/// System audio volume state. Returned by get_volume and the /get_volume endpoint.
 #[derive(Serialize)]
 struct VolumeInfo {
-    volume: u32,
-    muted: bool,
+    volume: u32, // 0-100 percentage
+    muted: bool, // true if the default output is muted
 }
 
+/// CLI handler for `get_volume` — outputs {"volume": N, "muted": bool} to stdout.
 fn cmd_get_volume() {
     match get_volume() {
         Some(info) => println!("{}", serde_json::to_string_pretty(&info).unwrap()),
@@ -933,6 +983,7 @@ fn cmd_get_volume() {
     }
 }
 
+/// CLI handler for `set_volume <level>` — sets system volume and prints status to stderr.
 fn cmd_set_volume(level: u16) {
     if set_volume(level) {
         eprintln!("Volume set to {}%.", level);
@@ -942,6 +993,7 @@ fn cmd_set_volume(level: u16) {
     }
 }
 
+/// CLI handler for `mute` and `unmute` — toggles audio mute state.
 fn cmd_set_mute(mute: bool) {
     if set_mute(mute) {
         eprintln!("Audio {}.", if mute { "muted" } else { "unmuted" });
@@ -951,6 +1003,7 @@ fn cmd_set_mute(mute: bool) {
     }
 }
 
+/// HTTP handler for /get_volume — returns {"volume": N, "muted": bool} or error.
 fn serve_get_volume() -> String {
     match get_volume() {
         Some(info) => serde_json::to_string(&info).unwrap_or_else(|_| "{}".into()),
@@ -958,6 +1011,7 @@ fn serve_get_volume() -> String {
     }
 }
 
+/// HTTP handler for /set_volume/<level> — sets volume and returns status JSON.
 fn serve_set_volume(level: u16) -> String {
     if set_volume(level) {
         format!(r#"{{"status":"ok","volume":{}}}"#, level)
@@ -966,8 +1020,10 @@ fn serve_set_volume(level: u16) -> String {
     }
 }
 
-// --- macOS: osascript ---
+// --- macOS volume: osascript wrapping AppleScript commands ---
 
+/// Get current volume and mute state on macOS via `osascript`.
+/// Makes two osascript calls: one for volume level, one for mute state.
 #[cfg(target_os = "macos")]
 fn get_volume() -> Option<VolumeInfo> {
     let output = std::process::Command::new("osascript")
@@ -984,6 +1040,7 @@ fn get_volume() -> Option<VolumeInfo> {
     Some(VolumeInfo { volume, muted })
 }
 
+/// Set system volume on macOS via osascript. Level is 0-100.
 #[cfg(target_os = "macos")]
 fn set_volume(level: u16) -> bool {
     std::process::Command::new("osascript")
@@ -993,6 +1050,7 @@ fn set_volume(level: u16) -> bool {
         .unwrap_or(false)
 }
 
+/// Toggle mute on macOS via osascript.
 #[cfg(target_os = "macos")]
 fn set_mute(mute: bool) -> bool {
     let val = if mute { "true" } else { "false" };
@@ -1003,10 +1061,12 @@ fn set_mute(mute: bool) -> bool {
         .unwrap_or(false)
 }
 
-// --- Windows: AudioDeviceCmdlets PowerShell module ---
+// --- Windows volume: AudioDeviceCmdlets PowerShell module ---
 // Requires one-time setup: Install-Module -Name AudioDeviceCmdlets
 // https://www.powershellgallery.com/packages/AudioDeviceCmdlets
 
+/// Get current volume and mute state on Windows via AudioDeviceCmdlets PowerShell module.
+/// Reads both playback volume and mute state in a single PowerShell invocation.
 #[cfg(target_os = "windows")]
 fn get_volume() -> Option<VolumeInfo> {
     let output = std::process::Command::new("powershell")
@@ -1021,6 +1081,7 @@ fn get_volume() -> Option<VolumeInfo> {
     Some(VolumeInfo { volume: volume.round() as u32, muted })
 }
 
+/// Set system volume on Windows via AudioDeviceCmdlets. Level is 0-100.
 #[cfg(target_os = "windows")]
 fn set_volume(level: u16) -> bool {
     std::process::Command::new("powershell")
@@ -1031,6 +1092,7 @@ fn set_volume(level: u16) -> bool {
         .unwrap_or(false)
 }
 
+/// Toggle mute on Windows via AudioDeviceCmdlets. Uses 1/0 instead of true/false.
 #[cfg(target_os = "windows")]
 fn set_mute(mute: bool) -> bool {
     let val = if mute { "1" } else { "0" };
@@ -1042,8 +1104,10 @@ fn set_mute(mute: bool) -> bool {
         .unwrap_or(false)
 }
 
-// --- Linux: pactl (PulseAudio/PipeWire) with amixer fallback ---
+// --- Linux volume: pactl (PulseAudio/PipeWire) with amixer (ALSA) fallback ---
 
+/// Get current volume on Linux. Tries pactl (PulseAudio/PipeWire) first,
+/// falls back to amixer (raw ALSA) for minimal setups without PulseAudio.
 #[cfg(target_os = "linux")]
 fn get_volume() -> Option<VolumeInfo> {
     // Try pactl first (PulseAudio / PipeWire)
@@ -1052,6 +1116,8 @@ fn get_volume() -> Option<VolumeInfo> {
     get_volume_amixer()
 }
 
+/// Get volume via pactl (PulseAudio/PipeWire). Parses the percentage from
+/// pactl's output format: "Volume: front-left: 32768 /  50% / -17.50 dB".
 #[cfg(target_os = "linux")]
 fn get_volume_pactl() -> Option<VolumeInfo> {
     let output = std::process::Command::new("pactl")
@@ -1073,6 +1139,7 @@ fn get_volume_pactl() -> Option<VolumeInfo> {
     Some(VolumeInfo { volume, muted })
 }
 
+/// Get volume via amixer (ALSA fallback). Parses "[75%]" and "[on]/[off]" from output.
 #[cfg(target_os = "linux")]
 fn get_volume_amixer() -> Option<VolumeInfo> {
     let output = std::process::Command::new("amixer")
@@ -1088,6 +1155,7 @@ fn get_volume_amixer() -> Option<VolumeInfo> {
     Some(VolumeInfo { volume, muted })
 }
 
+/// Set volume on Linux. Tries pactl first, falls back to amixer.
 #[cfg(target_os = "linux")]
 fn set_volume(level: u16) -> bool {
     // Try pactl first
@@ -1105,6 +1173,7 @@ fn set_volume(level: u16) -> bool {
         .unwrap_or(false)
 }
 
+/// Toggle mute on Linux. Tries pactl first, falls back to amixer.
 #[cfg(target_os = "linux")]
 fn set_mute(mute: bool) -> bool {
     let val = if mute { "1" } else { "0" };
@@ -1131,9 +1200,11 @@ fn set_mute(mute: bool) -> bool {
 // Linux X11: xrandr --scale. Linux Wayland: wlr-randr --scale.
 // =========================================================================
 
-const SCALE_MIN: u16 = 75;
-const SCALE_MAX: u16 = 300;
+const SCALE_MIN: u16 = 75;  // below 75% UI elements become unusably small
+const SCALE_MAX: u16 = 300; // above 300% UI elements become unusably large
 
+/// Clamp a scale percentage to the safe range (75%-300%).
+/// Prints a warning to stderr if the value was clamped.
 fn clamp_scale(pct: u16) -> u16 {
     let clamped = pct.max(SCALE_MIN).min(SCALE_MAX);
     if clamped != pct {
@@ -1142,18 +1213,21 @@ fn clamp_scale(pct: u16) -> u16 {
     clamped
 }
 
+/// Per-display scale factor info. Returned by get_scale and the /get_scale endpoint.
 #[derive(Serialize)]
 struct ScaleInfo {
-    id: String,
-    name: String,
-    scale_percent: u32,
+    id: String,          // "builtin", "1", "2", ... or "system" (Windows)
+    name: String,        // human-readable display/output name
+    scale_percent: u32,  // current scale as percentage (100 = native, 200 = 2x/Retina)
 }
 
+/// CLI handler for `get_scale` — outputs per-display scale info as JSON array.
 fn cmd_get_scale() {
     let scales = get_all_scales();
     println!("{}", serde_json::to_string_pretty(&scales).unwrap());
 }
 
+/// CLI handler for `set_scale_all <percent>` — sets scale on all displays.
 fn cmd_set_scale_all(pct: u16) {
     let scales = get_all_scales();
     for s in &scales {
@@ -1166,6 +1240,7 @@ fn cmd_set_scale_all(pct: u16) {
     }
 }
 
+/// CLI handler for `set_scale_one <id> <percent>` — sets scale on a single display.
 fn cmd_set_scale_one(id: &str, pct: u16) {
     let scales = get_all_scales();
     for s in &scales {
@@ -1187,10 +1262,12 @@ fn cmd_set_scale_one(id: &str, pct: u16) {
     std::process::exit(1);
 }
 
+/// HTTP handler for /get_scale — returns per-display scale info as JSON array.
 fn serve_get_scale() -> String {
     serde_json::to_string(&get_all_scales()).unwrap_or_else(|_| "[]".into())
 }
 
+/// HTTP handler for /set_scale_all/<percent> — sets scale on all displays.
 fn serve_set_scale_all(pct: u16) -> String {
     let scales = get_all_scales();
     let mut results: Vec<serde_json::Value> = Vec::new();
@@ -1205,6 +1282,7 @@ fn serve_set_scale_all(pct: u16) -> String {
     serde_json::to_string(&results).unwrap_or_else(|_| "[]".into())
 }
 
+/// HTTP handler for /set_scale_one/<id>/<percent> — sets scale on a single display.
 fn serve_set_scale_one(id: &str, pct: u16) -> String {
     let scales = get_all_scales();
     for s in &scales {
@@ -1242,6 +1320,8 @@ extern "C" {
     fn CFRelease(cf: *const std::ffi::c_void);
 }
 
+/// Get per-display scale factors on macOS via CoreGraphics.
+/// Scale = pixel_width / logical_width (e.g., 3456/1728 = 2.0 = 200% Retina).
 #[cfg(target_os = "macos")]
 fn get_all_scales() -> Vec<ScaleInfo> {
     unsafe {
@@ -1290,6 +1370,9 @@ fn get_all_scales() -> Vec<ScaleInfo> {
     }
 }
 
+/// Set display scale on macOS by switching to a different display mode.
+/// Finds the mode whose logical width best matches the target scale percentage,
+/// preferring HiDPI modes when available. This changes the effective resolution.
 #[cfg(target_os = "macos")]
 fn set_scale(id: &str, pct: u16) -> bool {
     unsafe {
@@ -1377,8 +1460,11 @@ fn set_scale(id: &str, pct: u16) -> bool {
     }
 }
 
-// --- Windows: DPI scaling via registry ---
+// --- Windows: DPI scaling via registry + GetDpiForSystem ---
 
+/// Get system-wide DPI scale on Windows.
+/// Uses GetDpiForSystem() to read the current DPI (96 = 100%, 144 = 150%, etc.).
+/// Windows DPI is system-wide, not per-monitor in this implementation.
 #[cfg(target_os = "windows")]
 fn get_all_scales() -> Vec<ScaleInfo> {
     // Read DPI settings from registry
@@ -1411,6 +1497,9 @@ fn get_all_scales() -> Vec<ScaleInfo> {
     }]
 }
 
+/// Set DPI scale on Windows via registry. Requires logout to take effect.
+/// Converts percentage to DPI value (100% = 96 DPI, 150% = 144 DPI).
+/// Sets both LogPixels and Win8DpiScaling registry keys.
 #[cfg(target_os = "windows")]
 fn set_scale(_id: &str, pct: u16) -> bool {
     // Windows requires logout to fully apply DPI changes.

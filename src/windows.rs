@@ -15,10 +15,15 @@ use winapi::um::wingdi::SetDeviceGammaRamp;
 // This only works for the built-in panel, not external monitors.
 // =========================================================================
 
-struct BuiltinControl; // unit struct (no fields) — just a type to impl traits on
+/// Built-in (laptop) display controller.
+/// Uses WMI (Windows Management Instrumentation) via PowerShell to read/write brightness.
+/// Unit struct (no fields) because WMI is a system-wide service — no per-instance state needed.
+struct BuiltinControl;
 
 impl BuiltinControl {
     /// Read current brightness from WMI. Returns 0-100 or None if not a laptop.
+    /// Queries WmiMonitorBrightness.CurrentBrightness — only available on laptops with
+    /// an internal panel. Desktops return None here.
     fn wmi_get() -> Option<u32> {
         let output = std::process::Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command",
@@ -31,6 +36,8 @@ impl BuiltinControl {
     }
 
     /// Set brightness via WMI. value is 0-100.
+    /// Uses WmiMonitorBrightnessMethods.WmiSetBrightness — the timeout param (1) is
+    /// in seconds and tells the driver how fast to ramp the backlight.
     fn wmi_set(value: u16) -> bool {
         let cmd = format!(
             "(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1, {})",
@@ -44,12 +51,15 @@ impl BuiltinControl {
     }
 }
 
+/// DisplayControl implementation for the built-in panel.
+/// All operations delegate to WMI — mode parameter is ignored since the built-in
+/// always uses the platform-native backlight API (no DDC, no gamma).
 impl DisplayControl for BuiltinControl {
-    fn get_brightness(&mut self) -> Option<u32> { Self::wmi_get() } // Self = BuiltinControl
-    fn get_contrast(&mut self) -> Option<u32> { None }              // WMI doesn't expose contrast
+    fn get_brightness(&mut self) -> Option<u32> { Self::wmi_get() }
+    fn get_contrast(&mut self) -> Option<u32> { None }  // WMI doesn't expose contrast
     fn set_brightness(&mut self, value: u16, _mode: &str) -> bool { Self::wmi_set(value) }
     fn set_contrast(&mut self, _value: u16) -> bool { false }
-    fn reset_gamma(&self) {}
+    fn reset_gamma(&self) {} // no gamma used for builtin — nothing to reset
 }
 
 // =========================================================================
@@ -57,12 +67,20 @@ impl DisplayControl for BuiltinControl {
 // ddc-winapi uses the Dxva2.dll API to send I2C commands to monitors.
 // =========================================================================
 
+/// External monitor controller.
+/// Combines two Windows APIs: DDC/CI via Dxva2 (hardware brightness) and
+/// GDI32 gamma ramp (software brightness). Both are needed because DDC doesn't
+/// work on all monitors, and gamma alone reduces color range.
 struct ExternalControl {
     ddc_monitor: ddc_winapi::Monitor, // wraps a physical monitor handle from Dxva2
     hmonitor: HMONITOR,               // GDI monitor handle for gamma ramp access
-    ddc_supported: bool,
+    ddc_supported: bool,              // true if initial VCP brightness read succeeded
 }
 
+/// DisplayControl implementation for external monitors.
+/// Supports DDC/CI (hardware), gamma ramp (software), or both stacked (force mode).
+/// Mode selection: "ddc" = DDC only, "gamma" = gamma only, "force" = both,
+/// "auto" = DDC if supported else gamma.
 impl DisplayControl for ExternalControl {
     fn get_brightness(&mut self) -> Option<u32> {
         // Read VCP brightness register via DDC/CI, convert to 0-100 percentage
@@ -167,9 +185,17 @@ fn enum_hmonitors() -> Vec<HMONITOR> {
 
 /// Get the PnP device identifier and primary flag for an HMONITOR.
 /// Returns (device_identifier, is_primary).
-/// The identifier is extracted from the monitor's PnP device ID via EnumDisplayDevicesW
-/// (e.g. "DEL40F4" for a Dell, "GSM5BBF" for an LG), or falls back to the display
-/// device name (e.g. "DISPLAY2").
+///
+/// The identifier is extracted from the monitor's PnP device ID via EnumDisplayDevicesW.
+/// The full device ID looks like `MONITOR\DEL40F4\{guid}\NNNN` — we extract the second
+/// segment (e.g. "DEL40F4" for a Dell, "GSM5BBF" for an LG). This is used to:
+/// 1. Disambiguate monitors with the same generic description ("Generic PnP Monitor")
+/// 2. Create composite names like "Generic PnP Monitor (DEL40F4)"
+///
+/// Falls back to the display device name (e.g. "DISPLAY2") if EnumDisplayDevicesW fails.
+///
+/// The `is_primary` flag (from MONITORINFOF_PRIMARY) is critical for the builtin dedup
+/// logic — on laptops, the primary HMONITOR is the built-in panel.
 fn get_hmonitor_details(hmonitor: HMONITOR) -> (String, bool) {
     unsafe {
         let mut info = MONITORINFOEXW::default();
@@ -212,9 +238,15 @@ fn get_hmonitor_details(hmonitor: HMONITOR) -> (String, bool) {
 // Platform implementation — discovers all displays on Windows
 // =========================================================================
 
+/// Windows platform implementation.
+/// Discovers all displays by combining WMI (built-in) with DDC/Dxva2 (external),
+/// deduplicating the built-in panel when it appears in both APIs.
 pub struct WinPlatform;
 
 impl Platform for WinPlatform {
+    /// Enumerate all displays on this Windows machine.
+    /// Returns a unified list of (DisplayInfo, DisplayControl) pairs for both
+    /// the built-in panel (via WMI) and external monitors (via DDC/CI).
     fn enumerate() -> Vec<(DisplayInfo, Box<dyn DisplayControl>)> {
         let mut result: Vec<(DisplayInfo, Box<dyn DisplayControl>)> = Vec::new();
 
@@ -236,11 +268,17 @@ impl Platform for WinPlatform {
 
         // --- External displays ---
         // We need both DDC handles (for brightness) and HMONITOR handles (for gamma).
-        // These come from different APIs so we zip them together by index.
-        // ddc_winapi::Monitor::enumerate() and enum_hmonitors() both use
-        // EnumDisplayMonitors internally, so indices align (assuming 1 physical per logical).
+        // These come from different APIs so we zip them together by index:
+        //   - ddc_winapi::Monitor::enumerate() → DDC physical monitor handles (Dxva2)
+        //   - enum_hmonitors() → GDI HMONITOR handles (for gamma ramp)
+        // Both use EnumDisplayMonitors internally, so indices align.
+        //
+        // DEDUP: On laptops, the built-in panel appears in both WMI and DDC enumeration.
+        // We track has_builtin to skip the primary HMONITOR from DDC when WMI already
+        // covered it. See "Windows display dedup" in CLAUDE.md for full explanation.
         let has_builtin = !result.is_empty();
         let hmonitors = enum_hmonitors();
+        // Pre-compute details for each HMONITOR (PnP device ID + primary flag)
         let hmonitor_details: Vec<(String, bool)> = hmonitors.iter()
             .map(|&hm| get_hmonitor_details(hm))
             .collect();
@@ -253,9 +291,12 @@ impl Platform for WinPlatform {
                     .cloned()
                     .unwrap_or((String::new(), false));
 
-                // Skip the primary (built-in) monitor if we already added it via WMI.
-                // On laptops, the built-in panel often appears in both WMI and DDC
-                // enumeration, causing a duplicate "Generic PnP Monitor" entry.
+                // DEDUP: Skip the primary (built-in) monitor if we already added it via WMI.
+                // On laptops, the built-in panel appears in both WMI and DDC enumeration.
+                // Without this check, you'd get a duplicate: the WMI "Built-in Display"
+                // plus a DDC "Generic PnP Monitor" with null brightness (laptop panels
+                // don't respond to DDC commands). The primary HMONITOR flag reliably
+                // identifies the built-in panel across all Windows laptop configurations.
                 if has_builtin && is_primary {
                     continue;
                 }
@@ -297,13 +338,19 @@ impl Platform for WinPlatform {
         result
     }
 
+    /// Reset gamma ramps on all monitors to their default (identity) values.
+    /// Called by the `reset` CLI command. Iterates every HMONITOR and writes
+    /// a 100% linear ramp, undoing any software dimming.
     fn reset_all_gamma() {
-        // Reset gamma on every monitor to the identity ramp (100% = no dimming)
         for hmonitor in enum_hmonitors() {
             set_gamma_for_hmonitor(hmonitor, 100);
         }
     }
 
+    /// Dump raw platform diagnostics for the `debug` command.
+    /// Returns WMI brightness, all HMONITOR details (device names, rects, primary flag,
+    /// PnP IDs), and raw DDC VCP reads for each monitor. This data is essential for
+    /// diagnosing dedup issues and DDC/CI communication problems.
     fn debug_info() -> serde_json::Value {
         // --- WMI brightness (built-in panel) ---
         let wmi_brightness = BuiltinControl::wmi_get();
@@ -354,6 +401,9 @@ impl Platform for WinPlatform {
 }
 
 /// Dump full details for a single HMONITOR — used by debug_info().
+/// Includes: device name (e.g. `\\.\DISPLAY1`), primary flag, monitor rect,
+/// adapter name (GPU driving this output), and the monitor's PnP device ID.
+/// This data helps diagnose which HMONITOR corresponds to which physical display.
 fn debug_hmonitor(hmonitor: HMONITOR, idx: usize) -> serde_json::Value {
     unsafe {
         let mut info = MONITORINFOEXW::default();
