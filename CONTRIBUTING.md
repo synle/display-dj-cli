@@ -280,6 +280,33 @@ The `tests.displays[]` section shows per-display results:
 
 Available via HTTP at `GET /debug`.
 
+#### `set_contrast_all <level>`
+
+Set contrast on all displays. Level is 0-100. Only works on DDC-capable external monitors — built-in displays and non-DDC monitors will report `FAILED`.
+
+```
+display-dj set_contrast_all 50
+```
+
+- **stdout**: (none)
+- **stderr**: Status per display (`OK` / `FAILED`)
+- **exit code**: 0
+
+#### `set_contrast_one <id|name> <level>`
+
+Set contrast on a single display. Level is 0-100.
+
+```
+display-dj set_contrast_one 2 70
+display-dj set_contrast_one "VX2718-2KPC" 50
+```
+
+- **stdout**: (none)
+- **stderr**: Status message (`OK` / `FAILED`), or error if not found
+- **exit code**: 0 on success, 1 if not found
+
+Available via HTTP at `GET /set_contrast_all/<level>` and `GET /set_contrast_one/<id>/<level>`.
+
 ### JSON Schemas
 
 #### `DisplayInfo`
@@ -566,6 +593,8 @@ All routes are `GET` with path-based parameters. No query strings, no POST bodie
 | `/theme` | Get current theme | `{theme}` |
 | `/reset` | Reset gamma to defaults | `{status}` |
 | `/health` | Health check | `{status: "ok"}` |
+| `/set_contrast_all/<level>` | Set contrast on all (DDC only) | `[{id, name, status}]` |
+| `/set_contrast_one/<id>/<level>` | Set contrast on one (DDC only) | `{id, name, status}` |
 | `/debug` | Full diagnostics with active tests | `{displays, scale, platform, tests}` |
 
 `<id>` accepts numeric IDs (`0`, `1`, `2`), `builtin`, or monitor names (URL-encoded).

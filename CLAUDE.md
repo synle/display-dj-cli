@@ -86,6 +86,10 @@ display-dj get_one <id|name>
 display-dj list
 display-dj reset
 
+# Contrast (DDC only — requires DDC-capable external monitor)
+display-dj set_contrast_all <level>
+display-dj set_contrast_one <id|name> <level>
+
 # Theme
 display-dj dark
 display-dj light

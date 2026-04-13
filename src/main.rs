@@ -76,6 +76,8 @@ fn usage() {
     eprintln!("  display-dj set_volume <level>           Set volume (0-100)");
     eprintln!("  display-dj mute                         Mute audio");
     eprintln!("  display-dj unmute                       Unmute audio");
+    eprintln!("  display-dj set_contrast_all <level>      Set contrast on all displays (0-100, DDC only)");
+    eprintln!("  display-dj set_contrast_one <id> <level> Set contrast on one display (0-100, DDC only)");
     eprintln!("  display-dj get_scale                    Get display scaling (JSON)");
     eprintln!("  display-dj set_scale_all <percent>       Set all displays scaling (75-300)");
     eprintln!("  display-dj set_scale_one <id> <percent>  Set one display scaling (75-300)");
@@ -191,6 +193,24 @@ fn dispatch<P: Platform>(cmd: &str, args: &[String]) {
         }
         "mute" => cmd_set_mute(true),
         "unmute" => cmd_set_mute(false),
+        "set_contrast_all" => {
+            let level: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+                usage();
+                std::process::exit(1);
+            });
+            cmd_set_contrast_all::<P>(level.min(100));
+        }
+        "set_contrast_one" => {
+            let id = args.get(2).unwrap_or_else(|| {
+                usage();
+                std::process::exit(1);
+            });
+            let level: u16 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+                usage();
+                std::process::exit(1);
+            });
+            cmd_set_contrast_one::<P>(id, level.min(100));
+        }
         "get_scale" => cmd_get_scale(),
         "set_scale_all" => {
             let pct: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
@@ -282,6 +302,41 @@ fn cmd_set_one<P: Platform>(id: &str, level: u16, mode: &str) {
         }
     }
     // Only reached if no display matched
+    print_not_found(id, &all_infos);
+    std::process::exit(1);
+}
+
+/// Set contrast on all displays. Only works on DDC-capable monitors.
+/// Built-in displays and monitors without DDC will report FAILED (expected).
+fn cmd_set_contrast_all<P: Platform>(level: u16) {
+    let displays = P::enumerate();
+    eprintln!("Setting contrast on all {} display(s) to {}%\n", displays.len(), level);
+    for (info, mut ctrl) in displays {
+        eprint!("  {} ({}): ", info.id, info.name);
+        if ctrl.set_contrast(level) {
+            eprintln!("OK");
+        } else {
+            eprintln!("FAILED (DDC not supported or contrast unavailable)");
+        }
+    }
+}
+
+/// Set contrast on a single display by ID or name.
+/// Exits with code 1 if the display is not found.
+fn cmd_set_contrast_one<P: Platform>(id: &str, level: u16) {
+    let displays = P::enumerate();
+    let all_infos: Vec<DisplayInfo> = displays.iter().map(|(info, _)| info.clone()).collect();
+    for (info, mut ctrl) in displays {
+        if matches_display(&info, id) {
+            eprint!("  {} ({}): ", info.id, info.name);
+            if ctrl.set_contrast(level) {
+                eprintln!("OK");
+            } else {
+                eprintln!("FAILED (DDC not supported or contrast unavailable)");
+            }
+            return;
+        }
+    }
     print_not_found(id, &all_infos);
     std::process::exit(1);
 }
@@ -542,6 +597,7 @@ fn cmd_serve<P: Platform>(port: u16) {
     eprintln!();
     eprintln!("Routes:  /list  /get_all  /get_one/<id>  /set_all/<level>  /set_all/<level>/<mode>");
     eprintln!("         /set_one/<id>/<level>  /set_one/<id>/<level>/<mode>");
+    eprintln!("         /set_contrast_all/<level>  /set_contrast_one/<id>/<level>");
     eprintln!("         /dark  /light  /theme  /reset  /health  /debug");
     eprintln!("         /get_volume  /set_volume/<level>  /mute  /unmute");
     eprintln!("         /get_scale  /set_scale_all/<percent>  /set_scale_one/<id>/<percent>");
@@ -583,6 +639,7 @@ fn cmd_serve<P: Platform>(port: u16) {
                     "/list", "/get_all", "/get_one/<id>",
                     "/set_all/<level>", "/set_all/<level>/<mode>",
                     "/set_one/<id>/<level>", "/set_one/<id>/<level>/<mode>",
+                    "/set_contrast_all/<level>", "/set_contrast_one/<id>/<level>",
                     "/dark", "/light", "/theme",
                     "/get_volume", "/set_volume/<level>", "/mute", "/unmute",
                     "/get_scale", "/set_scale_all/<percent>", "/set_scale_one/<id>/<percent>",
@@ -613,6 +670,18 @@ fn cmd_serve<P: Platform>(port: u16) {
                         serve_set_one::<P>(&id, level, mode)
                     }
                     _ => r#"{"error":"usage: /set_one/<id>/<level> or /set_one/<id>/<level>/<mode>"}"#.to_string(),
+                }
+            }
+            "set_contrast_all" => match segments.get(1).and_then(|l| l.parse::<u16>().ok()) {
+                Some(level) => serve_set_contrast_all::<P>(level.min(100)),
+                None => r#"{"error":"usage: /set_contrast_all/<level> (0-100)"}"#.to_string(),
+            },
+            "set_contrast_one" => {
+                let id = segments.get(1).map(|s| url_decode(s));
+                let level = segments.get(2).and_then(|l| l.parse::<u16>().ok());
+                match (id, level) {
+                    (Some(id), Some(level)) => serve_set_contrast_one::<P>(&id, level.min(100)),
+                    _ => r#"{"error":"usage: /set_contrast_one/<id>/<level>"}"#.to_string(),
                 }
             }
             "reset" => { P::reset_all_gamma(); r#"{"status":"ok"}"#.to_string() }
@@ -722,6 +791,40 @@ fn serve_set_one<P: Platform>(id: &str, level: u16, mode: &str) -> String {
     for (info, mut ctrl) in displays {
         if matches_display(&info, id) {
             let ok = ctrl.set_brightness(level, mode);
+            return serde_json::to_string(&serde_json::json!({
+                "id": info.id,
+                "name": info.name,
+                "status": if ok { "ok" } else { "failed" }
+            })).unwrap_or_else(|_| "{}".into());
+        }
+    }
+    format!(r#"{{"error":"display '{}' not found"}}"#, id)
+}
+
+/// HTTP handler for /set_contrast_all/<level>.
+/// Sets contrast on all displays via DDC/CI and returns per-display status.
+/// Monitors without DDC support will report "failed".
+fn serve_set_contrast_all<P: Platform>(level: u16) -> String {
+    let displays = P::enumerate();
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for (info, mut ctrl) in displays {
+        let ok = ctrl.set_contrast(level);
+        results.push(serde_json::json!({
+            "id": info.id,
+            "name": info.name,
+            "status": if ok { "ok" } else { "failed" }
+        }));
+    }
+    serde_json::to_string(&results).unwrap_or_else(|_| "[]".into())
+}
+
+/// HTTP handler for /set_contrast_one/<id>/<level>.
+/// Sets contrast on a single display by ID or name via DDC/CI.
+fn serve_set_contrast_one<P: Platform>(id: &str, level: u16) -> String {
+    let displays = P::enumerate();
+    for (info, mut ctrl) in displays {
+        if matches_display(&info, id) {
+            let ok = ctrl.set_contrast(level);
             return serde_json::to_string(&serde_json::json!({
                 "id": info.id,
                 "name": info.name,
@@ -2177,5 +2280,48 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["id"], "builtin");
         assert_eq!(parsed["brightness"], 80);
+    }
+
+    // --- Contrast ---
+
+    #[test]
+    fn serve_set_contrast_all_returns_status_per_display() {
+        let json = serve_set_contrast_all::<MockPlatform>(50);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.len(), 3);
+        for item in &parsed {
+            assert_eq!(item["status"], "ok");
+        }
+    }
+
+    #[test]
+    fn serve_set_contrast_one_by_id() {
+        let json = serve_set_contrast_one::<MockPlatform>("2", 30);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["id"], "2");
+        assert_eq!(parsed["status"], "ok");
+    }
+
+    #[test]
+    fn serve_set_contrast_one_by_name() {
+        let json = serve_set_contrast_one::<MockPlatform>("VX2718-2KPC", 70);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["id"], "2");
+        assert_eq!(parsed["status"], "ok");
+    }
+
+    #[test]
+    fn serve_set_contrast_one_not_found() {
+        let json = serve_set_contrast_one::<MockPlatform>("99", 50);
+        assert!(json.contains("error"));
+        assert!(json.contains("not found"));
+    }
+
+    #[test]
+    fn serve_set_contrast_one_builtin_by_zero() {
+        let json = serve_set_contrast_one::<MockPlatform>("0", 50);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["id"], "builtin");
+        assert_eq!(parsed["status"], "ok");
     }
 }

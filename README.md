@@ -41,6 +41,8 @@ display-dj get_all                      # Get brightness for all (JSON)
 display-dj get_one <id>                 # Get brightness for one (JSON)
 display-dj list                         # List all displays (JSON)
 display-dj reset                        # Reset gamma to defaults
+display-dj set_contrast_all <level>     # Set contrast on all displays (0-100, DDC only)
+display-dj set_contrast_one <id> <level> # Set contrast on one display (0-100, DDC only)
 display-dj dark                         # Switch to dark mode
 display-dj light                        # Switch to light mode
 display-dj theme                        # Get current theme (JSON)
@@ -65,6 +67,8 @@ display-dj set_one 2 100 ddc            # set external #2 via DDC only
 display-dj set_one "XZ322QU V3" 30      # set by monitor name
 display-dj get_one builtin              # read brightness as JSON
 display-dj reset                        # restore gamma
+display-dj set_contrast_all 50          # set contrast on all DDC monitors
+display-dj set_contrast_one 2 70        # set contrast on external #2
 display-dj dark                         # switch to dark mode
 display-dj theme                        # check current theme
 display-dj get_volume                   # read volume as JSON
@@ -119,6 +123,10 @@ curl localhost:51337/set_all/50/ddc
 curl localhost:51337/set_one/2/80
 curl localhost:51337/set_one/2/80/force
 curl localhost:51337/set_one/builtin/60
+
+# Set contrast (0-100, DDC only)
+curl localhost:51337/set_contrast_all/50
+curl localhost:51337/set_contrast_one/2/70
 
 # Theme
 curl localhost:51337/dark
