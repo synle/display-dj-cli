@@ -2,6 +2,8 @@
 
 Cross-platform CLI for monitor brightness, display scaling, system volume, and dark mode control.
 
+See [DEV.md](DEV.md) for the full developer guide (architecture diagrams, build instructions, request lifecycle, where to edit).
+
 ## Architecture
 
 Platform-abstracted Rust binary with shared interface (`main.rs`) and platform modules.

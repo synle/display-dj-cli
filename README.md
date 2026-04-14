@@ -294,6 +294,10 @@ groups | grep i2c
 | **Gamma** | Adjusts the GPU's color output curve to simulate dimming | Works everywhere, but reduces color range |
 | **Force** | Applies both DDC + gamma together | Most consistent across mixed monitor setups |
 
+## Contributing
+
+See [DEV.md](DEV.md) for architecture, build instructions, platform implementation details, and where to edit for common tasks. See [CONTRIBUTING.md](CONTRIBUTING.md) for the Rust syntax guide and CLI API reference.
+
 ## Related
 
 **[display-dj](https://github.com/synle/display-dj)** — A cross-platform desktop app (Tauri + React) that uses this CLI as its backend sidecar. Provides a system tray popup with brightness sliders, dark mode toggle, volume control, night mode scheduling, and global keyboard shortcuts. Available for macOS, Windows, and Linux.
