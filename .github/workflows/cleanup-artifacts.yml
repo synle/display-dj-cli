@@ -1,4 +1,4 @@
-name: Cleanup Artifacts, Draft Releases & Old Runs
+name: Cleanup Artifacts (Scheduled)
 
 on:
   schedule:
