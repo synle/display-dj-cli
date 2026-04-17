@@ -119,6 +119,12 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f | sort
 
+      - name: Delete existing release and tag
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
