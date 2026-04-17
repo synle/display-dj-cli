@@ -2,7 +2,7 @@
 
 [![Build Release Binaries](https://github.com/synle/display-dj-cli/actions/workflows/build.yml/badge.svg)](https://github.com/synle/display-dj-cli/actions/workflows/build.yml)
 
-Cross-platform CLI for controlling monitor brightness, display scaling, system volume, and dark mode.
+Cross-platform CLI for controlling monitor brightness, display scaling, system volume, dark mode, and keep-awake.
 
 Supports **macOS**, **Windows**, and **Linux** (X11 + Wayland).
 
@@ -55,6 +55,9 @@ display-dj unmute                       # Unmute audio
 display-dj get_scale                    # Get display scaling (JSON)
 display-dj set_scale_all <percent>      # Set all displays scaling (75-300)
 display-dj set_scale_one <id> <percent> # Set one display scaling (75-300)
+display-dj keep_awake_on                # Prevent system sleep (blocks until Ctrl+C)
+display-dj keep_awake_off               # Stop preventing system sleep
+display-dj get_keep_awake               # Get keep-awake status (JSON)
 display-dj debug                        # Dump diagnostics for all displays (JSON)
 display-dj serve [port]                 # Start HTTP server (default: 51337)
 ```
@@ -80,6 +83,9 @@ display-dj unmute                       # unmute
 display-dj get_scale                    # see current scale per display
 display-dj set_scale_all 150            # set all displays to 150%
 display-dj set_scale_one builtin 200    # set built-in to 200% (Retina)
+display-dj keep_awake_on                # prevent sleep (Ctrl+C to stop)
+display-dj get_keep_awake               # check keep-awake status
+display-dj keep_awake_off               # stop preventing sleep
 display-dj debug                        # dump full diagnostics (active tests + raw platform data)
 display-dj serve                        # start HTTP server on port 51337
 ```
@@ -146,6 +152,11 @@ curl localhost:51337/get_scale
 curl localhost:51337/set_scale_all/150
 curl localhost:51337/set_scale_one/builtin/200
 
+# Keep-awake
+curl localhost:51337/keep_awake
+curl localhost:51337/keep_awake/enable
+curl localhost:51337/keep_awake/disable
+
 # Utility
 curl localhost:51337/reset
 curl localhost:51337/health
@@ -200,6 +211,7 @@ curl -s localhost:51337/get_all | jq '.[].brightness'
 | Dark/light mode | `osascript` (System Events) |
 | Volume | `osascript` (`get volume settings` / `set volume output volume`) |
 | Scaling | CoreGraphics native FFI (`CGDisplayCopyAllDisplayModes` / `CGDisplaySetDisplayMode`) |
+| Keep-awake | `caffeinate -di` child process (pre-installed) |
 
 Works on macOS 11+ (Big Sur and later). Apple Silicon and Intel.
 
@@ -215,6 +227,7 @@ Works on macOS 11+ (Big Sur and later). Apple Silicon and Intel.
 | Dark/light mode | Registry (`AppsUseLightTheme` + `SystemUsesLightTheme`) |
 | Volume | PowerShell + COM `IAudioEndpointVolume` |
 | Scaling | Registry DPI (`LogPixels`) — requires logout to apply |
+| Keep-awake | `SetThreadExecutionState` Win32 API (no external deps) |
 
 Works on Windows 10 and later.
 
@@ -234,6 +247,7 @@ Works on Windows 10 and later.
 | Volume | `pactl` (PulseAudio/PipeWire) with `amixer` (ALSA) fallback | Pre-installed on most desktops |
 | Scaling (X11) | `xrandr --scale` | `xrandr` (usually pre-installed) |
 | Scaling (Wayland) | `wlr-randr --scale` | `wlr-randr` |
+| Keep-awake | `systemd-inhibit` child process | `systemd` (pre-installed on most distros) |
 
 #### Ubuntu / Debian
 

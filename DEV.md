@@ -56,7 +56,7 @@ display-dj-cli/
 | File | Role |
 |---|---|
 | `Cargo.toml` | Dependencies, project metadata, per-platform conditional deps |
-| `src/main.rs` | Entry point. Shared types (`DisplayInfo`), traits (`Platform`, `DisplayControl`), CLI parsing, command dispatch, HTTP server, and cross-platform dark mode/volume/scaling |
+| `src/main.rs` | Entry point. Shared types (`DisplayInfo`), traits (`Platform`, `DisplayControl`), CLI parsing, command dispatch, HTTP server, and cross-platform dark mode/volume/scaling/keep-awake |
 | `src/macos.rs` | macOS `Platform` + `DisplayControl` impl. CoreGraphics FFI for gamma, DisplayServices private framework for built-in brightness, `ddc-macos` crate for DDC/CI |
 | `src/windows.rs` | Windows `Platform` + `DisplayControl` impl. Win32 DDC/CI, WMI via PowerShell for built-in, gamma ramp via GDI32, HMONITOR dedup, PnP device ID enrichment |
 | `src/linux.rs` | Linux `Platform` + `DisplayControl` impl. sysfs/`brightnessctl` for built-in, `ddcutil` for DDC/CI, `xrandr`/`wlr-randr`/`wl-gammarelay-rs` for gamma. Runtime display server detection |
@@ -139,6 +139,7 @@ cargo test
 | Dark mode | `osascript` via System Events |
 | Volume | `osascript` — `get volume settings` / `set volume output volume` |
 | Scaling | CoreGraphics native FFI — `CGDisplayCopyAllDisplayModes` + `CGDisplaySetDisplayMode` |
+| Keep-awake | `caffeinate -di` child process (pre-installed) |
 
 ### Windows (`src/windows.rs`)
 
@@ -150,6 +151,7 @@ cargo test
 | Dark mode | Registry keys `AppsUseLightTheme` + `SystemUsesLightTheme` + `WM_SETTINGCHANGE` broadcast |
 | Volume | PowerShell `AudioDeviceCmdlets` module |
 | Scaling | Registry DPI (`LogPixels` + `Win8DpiScaling`) — requires logout |
+| Keep-awake | `SetThreadExecutionState` Win32 API (ES_CONTINUOUS + ES_SYSTEM_REQUIRED + ES_DISPLAY_REQUIRED) |
 
 **Builtin dedup:** On laptops, the built-in panel appears in both WMI and DDC enumeration. The enumerate code checks `MONITORINFOF_PRIMARY` via `GetMonitorInfoW` and skips the primary HMONITOR from DDC when a WMI builtin was already detected. See CLAUDE.md for full details.
 
@@ -167,6 +169,7 @@ cargo test
 | Dark mode | `gsettings` (GNOME) > `plasma-apply-colorscheme` (KDE) > `xfconf-query` (XFCE) |
 | Volume | `pactl` (PulseAudio/PipeWire) with `amixer` (ALSA) fallback |
 | Scaling | `xrandr --scale` (X11, inverse) or `wlr-randr --scale` (Wayland, direct) |
+| Keep-awake | `systemd-inhibit --what=idle --who=display-dj sleep infinity` child process |
 
 ## Output Conventions
 
@@ -207,5 +210,6 @@ Tests run on native runners (macOS ARM, Windows x64, Linux x64). Cross-compiled 
 | Change dark mode behavior | `main.rs` — `cmd_theme()` function, behind `#[cfg(target_os)]` blocks |
 | Change volume behavior | `main.rs` — `cmd_get_volume()` / `cmd_set_volume()`, behind `#[cfg(target_os)]` blocks |
 | Change scaling behavior | `main.rs` — `cmd_get_scale()` / `cmd_set_scale_*()`, behind `#[cfg(target_os)]` blocks |
+| Change keep-awake behavior | `main.rs` — `enable_keep_awake()` / `disable_keep_awake()` / `is_keep_awake_active()`, behind `#[cfg(target_os)]` blocks |
 | Add a new shared type | `main.rs` — add struct with `#[derive(Serialize, Clone)]` |
 | Add a platform dependency | `Cargo.toml` — under `[target.'cfg(target_os = "...")'.dependencies]` |

@@ -23,6 +23,7 @@ Dark mode, volume, and scaling live directly in `main.rs` behind `#[cfg(target_o
 4. **Dark mode**: `osascript` via System Events (`tell appearance preferences to set dark mode`).
 5. **Volume**: `osascript` — `get volume settings` / `set volume output volume`.
 6. **Scaling**: CoreGraphics native FFI — `CGDisplayCopyAllDisplayModes` to enumerate modes, `CGDisplaySetDisplayMode` to switch. Scale = `CGDisplayModeGetPixelWidth / CGDisplayModeGetWidth`. No external deps.
+7. **Keep-awake**: `caffeinate -di` as a child process. `-d` prevents display sleep, `-i` prevents idle sleep. Kill the child to disable.
 
 ### Windows (`src/windows.rs` + `main.rs`)
 
@@ -33,6 +34,7 @@ Dark mode, volume, and scaling live directly in `main.rs` behind `#[cfg(target_o
 5. **Dark mode**: Registry keys `AppsUseLightTheme` + `SystemUsesLightTheme` via `reg add` + `WM_SETTINGCHANGE` broadcast for title bar refresh.
 6. **Volume**: PowerShell `AudioDeviceCmdlets` module. Requires one-time setup: `Install-Module -Name AudioDeviceCmdlets`.
 7. **Scaling**: Registry DPI (`LogPixels` + `Win8DpiScaling`). Requires logout to apply.
+8. **Keep-awake**: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)` via Win32 API. Reset with `SetThreadExecutionState(ES_CONTINUOUS)`.
 
 ### Linux (`src/linux.rs` + `main.rs`)
 
@@ -46,6 +48,7 @@ Dark mode, volume, and scaling live directly in `main.rs` behind `#[cfg(target_o
 8. **Volume**: `pactl` (PulseAudio/PipeWire) with `amixer` (ALSA) fallback.
 9. **Scaling (X11)**: `xrandr --scale`. Uses inverse scale (100%/target) since xrandr scales the framebuffer.
 10. **Scaling (Wayland)**: `wlr-randr --scale`. Direct scale factor.
+11. **Keep-awake**: `systemd-inhibit --what=idle --who=display-dj --why=KeepAwake sleep infinity` as a child process. Kill to disable.
 
 ### Windows display dedup (builtin duplicate elimination)
 
@@ -76,6 +79,7 @@ On Windows laptops, the built-in panel often appears in **both** the WMI brightn
 - The `force` mode (DDC + gamma stacked) provides the most consistent results across mixed monitor setups.
 - Scale is clamped to 75%-300% on all platforms to prevent unusable UI.
 - macOS scaling switches display modes (resolution-based). Windows requires logout. Linux X11/Wayland applies instantly.
+- Keep-awake uses OS-native subprocess/syscall (caffeinate, systemd-inhibit, SetThreadExecutionState) — no external deps. CLI `keep_awake_on` blocks until Ctrl+C. Server mode uses `/keep_awake/enable` and `/keep_awake/disable` for toggle control.
 
 ## CLI
 
@@ -108,11 +112,24 @@ display-dj get_scale
 display-dj set_scale_all <percent>
 display-dj set_scale_one <id|name> <percent>
 
+# Keep-awake
+display-dj keep_awake_on
+display-dj keep_awake_off
+display-dj get_keep_awake
+
 # Diagnostics
 display-dj debug
 
 # Server
 display-dj serve [port]
+```
+
+### Server keep-awake endpoints
+
+```
+GET  /keep_awake          → {"enabled": true/false}
+POST /keep_awake/enable   → {"status":"ok","enabled":true}
+POST /keep_awake/disable  → {"status":"ok","enabled":false}
 ```
 
 ## GitHub Raw File URLs

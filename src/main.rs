@@ -81,6 +81,9 @@ fn usage() {
     eprintln!("  display-dj get_scale                    Get display scaling (JSON)");
     eprintln!("  display-dj set_scale_all <percent>       Set all displays scaling (75-300)");
     eprintln!("  display-dj set_scale_one <id> <percent>  Set one display scaling (75-300)");
+    eprintln!("  display-dj keep_awake_on                Prevent system sleep (blocks until Ctrl+C)");
+    eprintln!("  display-dj keep_awake_off               Stop preventing system sleep");
+    eprintln!("  display-dj get_keep_awake               Get keep-awake status (JSON)");
     eprintln!("  display-dj debug                        Dump debug info for all displays (JSON)");
     eprintln!("  display-dj serve [port]                 Start HTTP server (default: 51337)");
     eprintln!();
@@ -230,6 +233,9 @@ fn dispatch<P: Platform>(cmd: &str, args: &[String]) {
             });
             cmd_set_scale_one(id, clamp_scale(pct));
         }
+        "keep_awake_on" => cmd_keep_awake_on(),
+        "keep_awake_off" => cmd_keep_awake_off(),
+        "get_keep_awake" => cmd_get_keep_awake(),
         "serve" => {
             let port: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(51337);
             cmd_serve::<P>(port);
@@ -600,6 +606,7 @@ fn cmd_serve<P: Platform>(port: u16) {
     eprintln!("         /set_contrast_all/<level>  /set_contrast_one/<id>/<level>");
     eprintln!("         /dark  /light  /theme  /reset  /health  /debug");
     eprintln!("         /get_volume  /set_volume/<level>  /mute  /unmute");
+    eprintln!("         /keep_awake  /keep_awake/enable  /keep_awake/disable");
     eprintln!("         /get_scale  /set_scale_all/<percent>  /set_scale_one/<id>/<percent>");
     eprintln!();
     eprintln!("Example: curl http://{}:{}/set_all/50", "127.0.0.1", port);
@@ -642,6 +649,7 @@ fn cmd_serve<P: Platform>(port: u16) {
                     "/set_contrast_all/<level>", "/set_contrast_one/<id>/<level>",
                     "/dark", "/light", "/theme",
                     "/get_volume", "/set_volume/<level>", "/mute", "/unmute",
+                    "/keep_awake", "/keep_awake/enable", "/keep_awake/disable",
                     "/get_scale", "/set_scale_all/<percent>", "/set_scale_one/<id>/<percent>",
                     "/reset", "/health", "/debug"
                 ]
@@ -699,6 +707,11 @@ fn cmd_serve<P: Platform>(port: u16) {
             },
             "mute" => { set_mute(true); r#"{"status":"ok"}"#.to_string() }
             "unmute" => { set_mute(false); r#"{"status":"ok"}"#.to_string() }
+            "keep_awake" => match segments.get(1).copied() {
+                Some("enable") => serve_keep_awake_enable(),
+                Some("disable") => serve_keep_awake_disable(),
+                _ => serve_get_keep_awake(),
+            },
             "get_scale" => serve_get_scale(),
             "set_scale_all" => match segments.get(1).and_then(|l| l.parse::<u16>().ok()) {
                 Some(pct) => serve_set_scale_all(clamp_scale(pct)),
@@ -1761,6 +1774,206 @@ fn set_scale(id: &str, pct: u16) -> bool {
 }
 
 // =========================================================================
+// Keep-awake — prevent system idle sleep.
+// macOS: caffeinate -di as a child process.
+// Windows: SetThreadExecutionState via Win32 API.
+// Linux: systemd-inhibit as a child process.
+// =========================================================================
+
+// State: child process handle (macOS/Linux) or bool flag (Windows).
+// Static Mutex allows both CLI and server modes to track keep-awake state.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+static KEEP_AWAKE_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+
+#[cfg(target_os = "windows")]
+static KEEP_AWAKE_ACTIVE: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
+// --- macOS: caffeinate ---
+
+/// Enable keep-awake on macOS by spawning `caffeinate -di`.
+/// -d = prevent display sleep, -i = prevent idle sleep.
+/// The child process is held in KEEP_AWAKE_CHILD; killing it disables keep-awake.
+#[cfg(target_os = "macos")]
+fn enable_keep_awake() -> bool {
+    let mut guard = KEEP_AWAKE_CHILD.lock().unwrap();
+    if guard.is_some() { return true; } // already active
+    match std::process::Command::new("caffeinate")
+        .args(["-di"])
+        .spawn()
+    {
+        Ok(child) => { *guard = Some(child); true }
+        Err(_) => false,
+    }
+}
+
+/// Disable keep-awake on macOS by killing the caffeinate child process.
+#[cfg(target_os = "macos")]
+fn disable_keep_awake() -> bool {
+    let mut guard = KEEP_AWAKE_CHILD.lock().unwrap();
+    if let Some(mut child) = guard.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return true;
+    }
+    // Fallback: kill external caffeinate processes (e.g., started by a prior CLI invocation)
+    std::process::Command::new("pkill")
+        .args(["-f", "caffeinate -di"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Check if keep-awake is active on macOS.
+#[cfg(target_os = "macos")]
+fn is_keep_awake_active() -> bool {
+    if KEEP_AWAKE_CHILD.lock().unwrap().is_some() { return true; }
+    // Check for external caffeinate process
+    std::process::Command::new("pgrep")
+        .args(["-f", "caffeinate -di"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+// --- Windows: SetThreadExecutionState ---
+
+/// Enable keep-awake on Windows via SetThreadExecutionState.
+/// Sets ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED to prevent
+/// both system sleep and display sleep.
+#[cfg(target_os = "windows")]
+fn enable_keep_awake() -> bool {
+    use windows::Win32::System::Power::{
+        SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
+    };
+    let ok = unsafe {
+        SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED) != 0
+    };
+    if ok { *KEEP_AWAKE_ACTIVE.lock().unwrap() = true; }
+    ok
+}
+
+/// Disable keep-awake on Windows by resetting to ES_CONTINUOUS only.
+#[cfg(target_os = "windows")]
+fn disable_keep_awake() -> bool {
+    use windows::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS};
+    let ok = unsafe {
+        SetThreadExecutionState(ES_CONTINUOUS) != 0
+    };
+    *KEEP_AWAKE_ACTIVE.lock().unwrap() = false;
+    ok
+}
+
+/// Check if keep-awake is active on Windows.
+#[cfg(target_os = "windows")]
+fn is_keep_awake_active() -> bool {
+    *KEEP_AWAKE_ACTIVE.lock().unwrap()
+}
+
+// --- Linux: systemd-inhibit ---
+
+/// Enable keep-awake on Linux by spawning `systemd-inhibit` with an idle inhibitor.
+/// Runs `sleep infinity` as the held command — the inhibitor lock is released when
+/// the process is killed.
+#[cfg(target_os = "linux")]
+fn enable_keep_awake() -> bool {
+    let mut guard = KEEP_AWAKE_CHILD.lock().unwrap();
+    if guard.is_some() { return true; }
+    match std::process::Command::new("systemd-inhibit")
+        .args([
+            "--what=idle",
+            "--who=display-dj",
+            "--why=Keep Awake",
+            "--mode=block",
+            "sleep", "infinity",
+        ])
+        .spawn()
+    {
+        Ok(child) => { *guard = Some(child); true }
+        Err(_) => false,
+    }
+}
+
+/// Disable keep-awake on Linux by killing the systemd-inhibit child process.
+#[cfg(target_os = "linux")]
+fn disable_keep_awake() -> bool {
+    let mut guard = KEEP_AWAKE_CHILD.lock().unwrap();
+    if let Some(mut child) = guard.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return true;
+    }
+    // Fallback: kill external systemd-inhibit processes started by display-dj
+    std::process::Command::new("pkill")
+        .args(["-f", "systemd-inhibit.*display-dj"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Check if keep-awake is active on Linux.
+#[cfg(target_os = "linux")]
+fn is_keep_awake_active() -> bool {
+    if KEEP_AWAKE_CHILD.lock().unwrap().is_some() { return true; }
+    std::process::Command::new("pgrep")
+        .args(["-f", "systemd-inhibit.*display-dj"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+// --- CLI handlers ---
+
+/// CLI handler for `keep_awake_on` — enables keep-awake and blocks until Ctrl+C.
+fn cmd_keep_awake_on() {
+    if enable_keep_awake() {
+        eprintln!("Keep-awake enabled. Press Ctrl+C to stop.");
+        loop {
+            thread::sleep(Duration::from_secs(60));
+        }
+    } else {
+        eprintln!("Failed to enable keep-awake.");
+        std::process::exit(1);
+    }
+}
+
+/// CLI handler for `keep_awake_off` — disables keep-awake.
+fn cmd_keep_awake_off() {
+    if disable_keep_awake() {
+        eprintln!("Keep-awake disabled.");
+    } else {
+        eprintln!("Keep-awake was not active.");
+    }
+}
+
+/// CLI handler for `get_keep_awake` — outputs {"enabled": true/false} to stdout.
+fn cmd_get_keep_awake() {
+    let enabled = is_keep_awake_active();
+    println!(r#"{{"enabled":{}}}"#, enabled);
+}
+
+// --- HTTP handlers ---
+
+/// HTTP handler for GET /keep_awake — returns {"enabled": true/false}.
+fn serve_get_keep_awake() -> String {
+    format!(r#"{{"enabled":{}}}"#, is_keep_awake_active())
+}
+
+/// HTTP handler for /keep_awake/enable — starts preventing sleep.
+fn serve_keep_awake_enable() -> String {
+    if enable_keep_awake() {
+        r#"{"status":"ok","enabled":true}"#.to_string()
+    } else {
+        r#"{"error":"failed to enable keep-awake"}"#.to_string()
+    }
+}
+
+/// HTTP handler for /keep_awake/disable — stops preventing sleep.
+fn serve_keep_awake_disable() -> String {
+    disable_keep_awake();
+    r#"{"status":"ok","enabled":false}"#.to_string()
+}
+
+// =========================================================================
 // Tests — everything that can be tested without a physical display
 // =========================================================================
 
@@ -2240,6 +2453,46 @@ mod tests {
         let json100 = serde_json::to_string(&v100).unwrap();
         assert!(json0.contains("\"volume\":0"));
         assert!(json100.contains("\"volume\":100"));
+    }
+
+    // --- Keep-awake ---
+
+    #[test]
+    fn serve_get_keep_awake_returns_json() {
+        let json = serve_get_keep_awake();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("enabled").is_some());
+        assert!(parsed["enabled"].is_boolean());
+    }
+
+    #[test]
+    fn serve_keep_awake_enable_returns_json() {
+        // enable_keep_awake() calls OS APIs — may fail in CI.
+        let json = serve_keep_awake_enable();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("status").is_some() || parsed.get("error").is_some());
+        // Clean up if it succeeded
+        if parsed.get("status").is_some() {
+            disable_keep_awake();
+        }
+    }
+
+    #[test]
+    fn serve_keep_awake_disable_returns_json() {
+        let json = serve_keep_awake_disable();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["enabled"], false);
+    }
+
+    #[test]
+    fn keep_awake_enable_disable_roundtrip() {
+        // Enable — may fail in CI but should return valid result
+        let enabled = enable_keep_awake();
+        if enabled {
+            assert!(is_keep_awake_active());
+            assert!(disable_keep_awake());
+        }
     }
 
     // --- MockControl edge cases ---
