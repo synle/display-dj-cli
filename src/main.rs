@@ -1836,15 +1836,25 @@ fn is_keep_awake_active() -> bool {
 }
 
 // --- Windows: SetThreadExecutionState ---
+// Direct FFI to kernel32.dll — avoids adding windows crate features for a single function.
+
+#[cfg(target_os = "windows")]
+extern "system" {
+    fn SetThreadExecutionState(esflags: u32) -> u32;
+}
+
+#[cfg(target_os = "windows")]
+const ES_CONTINUOUS: u32 = 0x80000000;
+#[cfg(target_os = "windows")]
+const ES_SYSTEM_REQUIRED: u32 = 0x00000001;
+#[cfg(target_os = "windows")]
+const ES_DISPLAY_REQUIRED: u32 = 0x00000002;
 
 /// Enable keep-awake on Windows via SetThreadExecutionState.
 /// Sets ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED to prevent
 /// both system sleep and display sleep.
 #[cfg(target_os = "windows")]
 fn enable_keep_awake() -> bool {
-    use windows::Win32::System::Power::{
-        SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
-    };
     let ok = unsafe {
         SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED) != 0
     };
@@ -1855,7 +1865,6 @@ fn enable_keep_awake() -> bool {
 /// Disable keep-awake on Windows by resetting to ES_CONTINUOUS only.
 #[cfg(target_os = "windows")]
 fn disable_keep_awake() -> bool {
-    use windows::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS};
     let ok = unsafe {
         SetThreadExecutionState(ES_CONTINUOUS) != 0
     };

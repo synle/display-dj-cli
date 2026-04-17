@@ -18,6 +18,5 @@ windows = { version = "0.58", features = [
     "Win32_Devices_Display",
     "Win32_Graphics_Gdi",
     "Win32_Foundation",
-    "Win32_System_Power",
 ] }
 winapi = { version = "0.3", features = ["wingdi", "windef"] }
