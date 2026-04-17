@@ -221,4 +221,15 @@ jobs:
             | Gamma (X11) | `xrandr` | Yes |
             | Gamma (Wayland) | `wlr-randr` or `wl-gammarelay-rs` | Yes |
 
+            ## Downloads
+
+            | Asset | Platform |
+            |-------|----------|
+            | [`display-dj-macos-arm64`](https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/display-dj-macos-arm64) | macOS Apple Silicon |
+            | [`display-dj-macos-x64`](https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/display-dj-macos-x64) | macOS Intel |
+            | [`display-dj-windows-x64.exe`](https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/display-dj-windows-x64.exe) | Windows x64 |
+            | [`display-dj-windows-arm64.exe`](https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/display-dj-windows-arm64.exe) | Windows ARM64 |
+            | [`display-dj-linux-x64`](https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/display-dj-linux-x64) | Linux x64 |
+            | [`display-dj-linux-arm64`](https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/display-dj-linux-arm64) | Linux ARM64 |
+
             See [README](https://github.com/${{ github.repository }}/blob/main/README.md) for full docs.
