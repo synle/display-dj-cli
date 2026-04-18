@@ -29,10 +29,11 @@ jobs:
           else
             SHA=$(git rev-parse --short HEAD)
           fi
-          TAG="beta-${SHA}"
+          DATE=$(date -u '+%Y-%m-%d-%H-%M')
+          TAG="release-beta-${DATE}-${SHA}"
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Beta build for commit: ${SHA}"
+          echo "Beta build for commit: ${SHA} at ${DATE}"
 
   build:
     needs: prepare
