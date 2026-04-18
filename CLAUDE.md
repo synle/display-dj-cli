@@ -122,6 +122,7 @@ display-dj get_keep_awake
 
 # Wallpaper
 display-dj set_wallpaper <fit> <path>
+display-dj set_wallpaper_one <index> <fit> <path>
 display-dj get_wallpaper
 display-dj get_wallpaper_supported
 
@@ -140,6 +141,7 @@ GET  /keep_awake          → {"enabled": true/false}
 POST /keep_awake/enable   → {"status":"ok","enabled":true}
 POST /keep_awake/disable  → {"status":"ok","enabled":false}
 GET  /set_wallpaper/<fit>/<path> → {"ok":true}
+GET  /set_wallpaper_one/<index>/<fit>/<path> → {"ok":true}
 GET  /get_wallpaper       → {"path":"...","fit":"fill"}
 GET  /get_wallpaper_supported → {"supported":true}
 ```

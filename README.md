@@ -58,7 +58,8 @@ display-dj set_scale_one <id> <percent> # Set one display scaling (75-300)
 display-dj keep_awake_on                # Prevent system sleep (blocks until Ctrl+C)
 display-dj keep_awake_off               # Stop preventing system sleep
 display-dj get_keep_awake               # Get keep-awake status (JSON)
-display-dj set_wallpaper <fit> <path>   # Set wallpaper (fit: fill/fit/stretch/center/tile)
+display-dj set_wallpaper <fit> <path>   # Set wallpaper on all monitors
+display-dj set_wallpaper_one <index> <fit> <path>  # Set wallpaper on one monitor (0-based)
 display-dj get_wallpaper                # Get current wallpaper (JSON)
 display-dj get_wallpaper_supported      # Check wallpaper support (JSON)
 display-dj debug                        # Dump diagnostics for all displays (JSON)
@@ -90,6 +91,7 @@ display-dj keep_awake_on                # prevent sleep (Ctrl+C to stop)
 display-dj get_keep_awake               # check keep-awake status
 display-dj keep_awake_off               # stop preventing sleep
 display-dj set_wallpaper fill ~/pic.jpg # set wallpaper with fill mode
+display-dj set_wallpaper_one 0 fill ~/pic.jpg  # set on monitor 0 only
 display-dj get_wallpaper                # get current wallpaper path + fit
 display-dj get_wallpaper_supported      # check if wallpaper is supported
 display-dj debug                        # dump full diagnostics (active tests + raw platform data)
@@ -165,6 +167,7 @@ curl localhost:51337/keep_awake/disable
 
 # Wallpaper
 curl localhost:51337/set_wallpaper/fill/Users/syle/Pictures/bg.jpg
+curl localhost:51337/set_wallpaper_one/0/fill/Users/syle/Pictures/bg.jpg
 curl localhost:51337/get_wallpaper
 curl localhost:51337/get_wallpaper_supported
 

@@ -84,7 +84,8 @@ fn usage() {
     eprintln!("  display-dj keep_awake_on                Prevent system sleep (blocks until Ctrl+C)");
     eprintln!("  display-dj keep_awake_off               Stop preventing system sleep");
     eprintln!("  display-dj get_keep_awake               Get keep-awake status (JSON)");
-    eprintln!("  display-dj set_wallpaper <fit> <path>   Set wallpaper (fit: fill/fit/stretch/center/tile)");
+    eprintln!("  display-dj set_wallpaper <fit> <path>   Set wallpaper on all monitors");
+    eprintln!("  display-dj set_wallpaper_one <index> <fit> <path>  Set wallpaper on one monitor (0-based)");
     eprintln!("  display-dj get_wallpaper                Get current wallpaper (JSON)");
     eprintln!("  display-dj get_wallpaper_supported      Check wallpaper support (JSON)");
     eprintln!("  display-dj debug                        Dump debug info for all displays (JSON)");
@@ -249,6 +250,21 @@ fn dispatch<P: Platform>(cmd: &str, args: &[String]) {
                 std::process::exit(1);
             });
             cmd_set_wallpaper(fit, path);
+        }
+        "set_wallpaper_one" => {
+            let index: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+                usage();
+                std::process::exit(1);
+            });
+            let fit = args.get(3).map(|s| s.as_str()).unwrap_or_else(|| {
+                usage();
+                std::process::exit(1);
+            });
+            let path = args.get(4).map(|s| s.as_str()).unwrap_or_else(|| {
+                usage();
+                std::process::exit(1);
+            });
+            cmd_set_wallpaper_one(index, fit, path);
         }
         "get_wallpaper" => cmd_get_wallpaper(),
         "get_wallpaper_supported" => cmd_get_wallpaper_supported(),
@@ -626,7 +642,8 @@ fn cmd_serve<P: Platform>(port: u16) {
     eprintln!("         /get_volume  /set_volume/<level>  /mute  /unmute");
     eprintln!("         /keep_awake  /keep_awake/enable  /keep_awake/disable");
     eprintln!("         /get_scale  /set_scale_all/<percent>  /set_scale_one/<id>/<percent>");
-    eprintln!("         /set_wallpaper/<fit>/<path>  /get_wallpaper  /get_wallpaper_supported");
+    eprintln!("         /set_wallpaper/<fit>/<path>  /set_wallpaper_one/<index>/<fit>/<path>");
+    eprintln!("         /get_wallpaper  /get_wallpaper_supported");
     eprintln!();
     eprintln!("Example: curl http://{}:{}/set_all/50", "127.0.0.1", port);
 
@@ -670,7 +687,8 @@ fn cmd_serve<P: Platform>(port: u16) {
                     "/get_volume", "/set_volume/<level>", "/mute", "/unmute",
                     "/keep_awake", "/keep_awake/enable", "/keep_awake/disable",
                     "/get_scale", "/set_scale_all/<percent>", "/set_scale_one/<id>/<percent>",
-                    "/set_wallpaper/<fit>/<path>", "/get_wallpaper", "/get_wallpaper_supported",
+                    "/set_wallpaper/<fit>/<path>", "/set_wallpaper_one/<index>/<fit>/<path>",
+                    "/get_wallpaper", "/get_wallpaper_supported",
                     "/reset", "/health", "/debug"
                 ]
             })).unwrap(),
@@ -754,6 +772,18 @@ fn cmd_serve<P: Platform>(port: u16) {
                     let path = format!("/{}", segments[2..].join("/"));
                     let path = url_decode(&path);
                     serve_set_wallpaper(fit, &path)
+                }
+            }
+            "set_wallpaper_one" => {
+                let index = segments.get(1).and_then(|s| s.parse::<usize>().ok());
+                let fit = segments.get(2).copied().unwrap_or("");
+                match index {
+                    Some(idx) if segments.len() >= 4 => {
+                        let path = format!("/{}", segments[3..].join("/"));
+                        let path = url_decode(&path);
+                        serve_set_wallpaper_one(idx, fit, &path)
+                    }
+                    _ => r#"{"error":"usage: /set_wallpaper_one/<index>/<fit>/<path>"}"#.to_string(),
                 }
             }
             "get_wallpaper" => serve_get_wallpaper(),
@@ -2111,6 +2141,109 @@ fn serve_get_wallpaper_supported() -> String {
     format!(r#"{{"supported":{}}}"#, is_wallpaper_supported())
 }
 
+// --- Per-monitor wallpaper ---
+
+/// CLI handler for `set_wallpaper_one <index> <fit> <path>` — sets wallpaper on one monitor.
+fn cmd_set_wallpaper_one(index: usize, fit: &str, path: &str) {
+    if !validate_fit(fit) {
+        eprintln!("Invalid fit mode: \"{}\". Valid: fill, fit, stretch, center, tile", fit);
+        std::process::exit(1);
+    }
+    if !std::path::Path::new(path).exists() {
+        eprintln!("File not found: {}", path);
+        std::process::exit(1);
+    }
+    match set_wallpaper_one(index, path, fit) {
+        Ok(()) => eprintln!("Wallpaper set on monitor {} to {} (fit: {}).", index, path, fit),
+        Err(msg) => {
+            eprintln!("{}", msg);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// HTTP handler for /set_wallpaper_one/<index>/<fit>/<path>.
+fn serve_set_wallpaper_one(index: usize, fit: &str, path: &str) -> String {
+    if !validate_fit(fit) {
+        return format!(r#"{{"error":"invalid fit mode: '{}'. Valid: fill, fit, stretch, center, tile"}}"#, fit);
+    }
+    if !std::path::Path::new(path).exists() {
+        return format!(r#"{{"error":"file not found: {}"}}"#, path);
+    }
+    match set_wallpaper_one(index, path, fit) {
+        Ok(()) => r#"{"ok":true}"#.to_string(),
+        Err(msg) => format!(r#"{{"error":"{}"}}"#, msg),
+    }
+}
+
+// --- macOS per-monitor: osascript with desktop index ---
+
+/// Set wallpaper on a specific monitor on macOS.
+/// AppleScript desktop indices are 1-based, so we add 1 to the 0-based index.
+#[cfg(target_os = "macos")]
+fn set_wallpaper_one(index: usize, path: &str, _fit: &str) -> Result<(), String> {
+    let desktop_num = index + 1; // AppleScript uses 1-based indexing
+    let script = format!(
+        "tell application \"System Events\" to tell desktop {} to set picture to \"{}\"",
+        desktop_num, path
+    );
+    let output = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .map_err(|e| format!("failed to run osascript: {}", e))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(format!("failed to set wallpaper on monitor {}: {}", index, stderr))
+    }
+}
+
+// --- Windows per-monitor: IDesktopWallpaper COM via PowerShell ---
+
+/// Set wallpaper on a specific monitor on Windows using IDesktopWallpaper COM interface.
+/// Gets the monitor device path by index, then sets wallpaper + fit on that monitor.
+#[cfg(target_os = "windows")]
+fn set_wallpaper_one(index: usize, path: &str, fit: &str) -> Result<(), String> {
+    let position = match fit {
+        "fill" => "4",    // DWPOS_FILL
+        "fit" => "3",     // DWPOS_FIT
+        "stretch" => "2", // DWPOS_STRETCH
+        "center" => "0",  // DWPOS_CENTER
+        "tile" => "1",    // DWPOS_TILE
+        _ => "4",
+    };
+    let escaped_path = path.replace('\'', "''");
+    let cmd = format!(
+        r#"$wp = New-Object -ComObject 'DesktopWallpaper'
+$count = $wp.GetMonitorDevicePathCount()
+if ({idx} -ge $count) {{ Write-Error "monitor index {idx} out of range (0..$($count-1))"; exit 1 }}
+$id = $wp.GetMonitorDevicePathAt({idx})
+$wp.SetWallpaper($id, '{path}')
+$wp.SetPosition({pos})
+"#,
+        idx = index, path = escaped_path, pos = position
+    );
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
+        .output()
+        .map_err(|e| format!("failed to run powershell: {}", e))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(format!("failed to set wallpaper on monitor {}: {}", index, stderr))
+    }
+}
+
+// --- Linux per-monitor: not natively supported ---
+
+/// Per-monitor wallpaper is not supported on Linux GNOME.
+#[cfg(target_os = "linux")]
+fn set_wallpaper_one(_index: usize, _path: &str, _fit: &str) -> Result<(), String> {
+    Err("per-monitor wallpaper not supported on this platform".to_string())
+}
+
 // --- macOS: osascript via System Events ---
 
 /// Set wallpaper on macOS using System Events AppleScript.
@@ -3050,6 +3183,30 @@ mod tests {
     fn serve_set_wallpaper_invalid_fit_all_variants() {
         for bad_fit in &["", "FILL", "Fit", "unknown", "scale", "crop"] {
             let json = serve_set_wallpaper(bad_fit, "/some/path.jpg");
+            assert!(json.contains("error"), "expected error for fit mode: {}", bad_fit);
+        }
+    }
+
+    // --- Per-monitor wallpaper ---
+
+    #[test]
+    fn serve_set_wallpaper_one_invalid_fit() {
+        let json = serve_set_wallpaper_one(0, "zoom", "/some/path.jpg");
+        assert!(json.contains("error"));
+        assert!(json.contains("invalid fit mode"));
+    }
+
+    #[test]
+    fn serve_set_wallpaper_one_missing_file() {
+        let json = serve_set_wallpaper_one(0, "fill", "/nonexistent/path/image.jpg");
+        assert!(json.contains("error"));
+        assert!(json.contains("file not found"));
+    }
+
+    #[test]
+    fn serve_set_wallpaper_one_invalid_fit_all_variants() {
+        for bad_fit in &["", "FILL", "unknown", "scale"] {
+            let json = serve_set_wallpaper_one(0, bad_fit, "/some/path.jpg");
             assert!(json.contains("error"), "expected error for fit mode: {}", bad_fit);
         }
     }
