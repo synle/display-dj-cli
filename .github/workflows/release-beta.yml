@@ -2,6 +2,11 @@ name: Beta Release
 
 on:
   workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Commit SHA to build. Leave empty for HEAD.'
+        required: false
+        type: string
 
 jobs:
   prepare:
@@ -11,17 +16,23 @@ jobs:
       tag: ${{ steps.info.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Get build info
+      - name: Resolve commit
         id: info
         run: |
-          SHA=$(git rev-parse --short HEAD)
-          BRANCH=$(git rev-parse --abbrev-ref HEAD | sed 's/[^a-zA-Z0-9._-]/-/g')
-          TAG="beta-${BRANCH}-${SHA}"
+          INPUT_SHA="${{ inputs.sha }}"
+          if [ -n "$INPUT_SHA" ]; then
+            git checkout "$INPUT_SHA"
+            SHA=$(git rev-parse --short HEAD)
+          else
+            SHA=$(git rev-parse --short HEAD)
+          fi
+          TAG="beta-${SHA}"
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
-          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Beta build for branch: ${BRANCH}, commit: ${SHA}"
+          echo "Beta build for commit: ${SHA}"
 
   build:
     needs: prepare
@@ -145,7 +156,7 @@ jobs:
           BUILD_RESULT: ${{ needs.build.result }}
         run: |
           > body.md
-          echo "Beta build from commit \`${SHA}\` on \`main\`" >> body.md
+          echo "Beta build from commit \`${SHA}\`" >> body.md
           echo "" >> body.md
           echo "**Build status:** ${BUILD_RESULT}" >> body.md
           echo "" >> body.md
