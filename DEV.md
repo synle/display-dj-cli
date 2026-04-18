@@ -215,5 +215,6 @@ Tests run on native runners (macOS ARM, Windows x64, Linux x64). Cross-compiled 
 | Change scaling behavior | `main.rs` — `cmd_get_scale()` / `cmd_set_scale_*()`, behind `#[cfg(target_os)]` blocks |
 | Change keep-awake behavior | `main.rs` — `enable_keep_awake()` / `disable_keep_awake()` / `is_keep_awake_active()`, behind `#[cfg(target_os)]` blocks |
 | Change wallpaper behavior | `main.rs` — `set_wallpaper()` / `get_wallpaper()` / `is_wallpaper_supported()`, behind `#[cfg(target_os)]` blocks |
+| Change slideshow behavior | `main.rs` — `slideshow_start()` / `slideshow_stop()` / `slideshow_status()` / `slideshow_cancel()`, `SLIDESHOW` static Mutex |
 | Add a new shared type | `main.rs` — add struct with `#[derive(Serialize, Clone)]` |
 | Add a platform dependency | `Cargo.toml` — under `[target.'cfg(target_os = "...")'.dependencies]` |

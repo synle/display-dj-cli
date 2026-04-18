@@ -62,6 +62,10 @@ display-dj set_wallpaper <fit> <path>   # Set wallpaper on all monitors
 display-dj set_wallpaper_one <index> <fit> <path>  # Set wallpaper on one monitor (0-based)
 display-dj get_wallpaper                # Get current wallpaper (JSON)
 display-dj get_wallpaper_supported      # Check wallpaper support (JSON)
+display-dj wallpaper_slideshow_start <interval> <order> <fit> <folder>
+                                        # Start slideshow (interval: minutes, order: forward/backward/random)
+display-dj wallpaper_slideshow_stop     # Stop slideshow
+display-dj wallpaper_slideshow_status   # Get slideshow status (JSON)
 display-dj debug                        # Dump diagnostics for all displays (JSON)
 display-dj serve [port]                 # Start HTTP server (default: 51337)
 ```
@@ -94,6 +98,9 @@ display-dj set_wallpaper fill ~/pic.jpg # set wallpaper with fill mode
 display-dj set_wallpaper_one 0 fill ~/pic.jpg  # set on monitor 0 only
 display-dj get_wallpaper                # get current wallpaper path + fit
 display-dj get_wallpaper_supported      # check if wallpaper is supported
+display-dj wallpaper_slideshow_start 30 forward fill ~/Pictures  # slideshow every 30 min
+display-dj wallpaper_slideshow_status   # check slideshow status
+display-dj wallpaper_slideshow_stop     # stop slideshow
 display-dj debug                        # dump full diagnostics (active tests + raw platform data)
 display-dj serve                        # start HTTP server on port 51337
 ```
@@ -170,6 +177,11 @@ curl localhost:51337/set_wallpaper/fill/Users/syle/Pictures/bg.jpg
 curl localhost:51337/set_wallpaper_one/0/fill/Users/syle/Pictures/bg.jpg
 curl localhost:51337/get_wallpaper
 curl localhost:51337/get_wallpaper_supported
+
+# Wallpaper slideshow
+curl localhost:51337/wallpaper_slideshow_start/30/forward/fill/Users/syle/Pictures
+curl localhost:51337/wallpaper_slideshow_status
+curl localhost:51337/wallpaper_slideshow_stop
 
 # Utility
 curl localhost:51337/reset

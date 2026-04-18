@@ -83,6 +83,7 @@ On Windows laptops, the built-in panel often appears in **both** the WMI brightn
 - Scale is clamped to 75%-300% on all platforms to prevent unusable UI.
 - macOS scaling switches display modes (resolution-based). Windows requires logout. Linux X11/Wayland applies instantly.
 - Keep-awake uses OS-native subprocess/syscall (caffeinate, systemd-inhibit, SetThreadExecutionState) — no external deps. CLI `keep_awake_on` blocks until Ctrl+C. Server mode uses `/keep_awake/enable` and `/keep_awake/disable` for toggle control.
+- Wallpaper slideshow uses a static `Mutex<Option<SlideshowState>>` + `Arc<AtomicBool>` cancel flag + background thread. Only one slideshow active at a time — starting a new one cancels the old. Manual wallpaper changes (`/set_wallpaper`, `/set_wallpaper_one`) auto-stop any running slideshow. Timer thread sleeps in 1-second increments to check the cancel flag frequently. For `forward`/`backward` order, the folder is rescanned each tick to pick up new/deleted files. For `random`, reshuffle happens after a full cycle.
 
 ## CLI
 
@@ -125,6 +126,9 @@ display-dj set_wallpaper <fit> <path>
 display-dj set_wallpaper_one <index> <fit> <path>
 display-dj get_wallpaper
 display-dj get_wallpaper_supported
+display-dj wallpaper_slideshow_start <interval> <order> <fit> <folder>
+display-dj wallpaper_slideshow_stop
+display-dj wallpaper_slideshow_status
 
 # Diagnostics
 display-dj debug
@@ -144,6 +148,9 @@ GET  /set_wallpaper/<fit>/<path> → {"ok":true}
 GET  /set_wallpaper_one/<index>/<fit>/<path> → {"ok":true}
 GET  /get_wallpaper       → {"path":"...","fit":"fill"}
 GET  /get_wallpaper_supported → {"supported":true}
+GET  /wallpaper_slideshow_start/<interval>/<order>/<fit>/<folder> → {"ok":true,"total_images":12,"current_image":"..."}
+GET  /wallpaper_slideshow_stop → {"ok":true,"was_running":true}
+GET  /wallpaper_slideshow_status → {"running":true,"folder":"...","interval_minutes":30,...}
 ```
 
 ## GitHub Raw File URLs

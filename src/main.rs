@@ -8,6 +8,7 @@ mod windows;
 mod linux;
 
 use serde::{Serialize, Deserialize};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::thread;
 use std::time::Duration;
 
@@ -88,6 +89,10 @@ fn usage() {
     eprintln!("  display-dj set_wallpaper_one <index> <fit> <path>  Set wallpaper on one monitor (0-based)");
     eprintln!("  display-dj get_wallpaper                Get current wallpaper (JSON)");
     eprintln!("  display-dj get_wallpaper_supported      Check wallpaper support (JSON)");
+    eprintln!("  display-dj wallpaper_slideshow_start <interval> <order> <fit> <folder>");
+    eprintln!("                                          Start slideshow (interval in minutes, order: forward/backward/random)");
+    eprintln!("  display-dj wallpaper_slideshow_stop      Stop slideshow");
+    eprintln!("  display-dj wallpaper_slideshow_status    Get slideshow status (JSON)");
     eprintln!("  display-dj debug                        Dump debug info for all displays (JSON)");
     eprintln!("  display-dj serve [port]                 Start HTTP server (default: 51337)");
     eprintln!();
@@ -268,6 +273,37 @@ fn dispatch<P: Platform>(cmd: &str, args: &[String]) {
         }
         "get_wallpaper" => cmd_get_wallpaper(),
         "get_wallpaper_supported" => cmd_get_wallpaper_supported(),
+        "wallpaper_slideshow_start" => {
+            let interval: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+                usage();
+                std::process::exit(1);
+            });
+            let order = args.get(3).map(|s| s.as_str()).unwrap_or_else(|| {
+                usage();
+                std::process::exit(1);
+            });
+            let fit = args.get(4).map(|s| s.as_str()).unwrap_or_else(|| {
+                usage();
+                std::process::exit(1);
+            });
+            let folder = args.get(5).map(|s| s.as_str()).unwrap_or_else(|| {
+                usage();
+                std::process::exit(1);
+            });
+            let json = slideshow_start(interval, order, fit, folder);
+            if json.contains("\"error\"") {
+                eprintln!("{}", json);
+                std::process::exit(1);
+            } else {
+                println!("{}", json);
+            }
+        }
+        "wallpaper_slideshow_stop" => {
+            println!("{}", slideshow_stop());
+        }
+        "wallpaper_slideshow_status" => {
+            println!("{}", slideshow_status());
+        }
         "serve" => {
             let port: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(51337);
             cmd_serve::<P>(port);
@@ -644,6 +680,8 @@ fn cmd_serve<P: Platform>(port: u16) {
     eprintln!("         /get_scale  /set_scale_all/<percent>  /set_scale_one/<id>/<percent>");
     eprintln!("         /set_wallpaper/<fit>/<path>  /set_wallpaper_one/<index>/<fit>/<path>");
     eprintln!("         /get_wallpaper  /get_wallpaper_supported");
+    eprintln!("         /wallpaper_slideshow_start/<interval>/<order>/<fit>/<folder>");
+    eprintln!("         /wallpaper_slideshow_stop  /wallpaper_slideshow_status");
     eprintln!();
     eprintln!("Example: curl http://{}:{}/set_all/50", "127.0.0.1", port);
 
@@ -689,6 +727,8 @@ fn cmd_serve<P: Platform>(port: u16) {
                     "/get_scale", "/set_scale_all/<percent>", "/set_scale_one/<id>/<percent>",
                     "/set_wallpaper/<fit>/<path>", "/set_wallpaper_one/<index>/<fit>/<path>",
                     "/get_wallpaper", "/get_wallpaper_supported",
+                    "/wallpaper_slideshow_start/<interval>/<order>/<fit>/<folder>",
+                    "/wallpaper_slideshow_stop", "/wallpaper_slideshow_status",
                     "/reset", "/health", "/debug"
                 ]
             })).unwrap(),
@@ -788,6 +828,21 @@ fn cmd_serve<P: Platform>(port: u16) {
             }
             "get_wallpaper" => serve_get_wallpaper(),
             "get_wallpaper_supported" => serve_get_wallpaper_supported(),
+            "wallpaper_slideshow_start" => {
+                let interval = segments.get(1).and_then(|s| s.parse::<u64>().ok());
+                let order = segments.get(2).copied().unwrap_or("");
+                let fit = segments.get(3).copied().unwrap_or("");
+                match interval {
+                    Some(mins) if segments.len() >= 5 => {
+                        let folder = format!("/{}", segments[4..].join("/"));
+                        let folder = url_decode(&folder);
+                        slideshow_start(mins, order, fit, &folder)
+                    }
+                    _ => r#"{"error":"usage: /wallpaper_slideshow_start/<interval>/<order>/<fit>/<folder>"}"#.to_string(),
+                }
+            }
+            "wallpaper_slideshow_stop" => slideshow_stop(),
+            "wallpaper_slideshow_status" => slideshow_status(),
             _ => {
                 let _ = write_http(&mut stream, 404, r#"{"error":"not found"}"#);
                 continue;
@@ -2122,6 +2177,8 @@ fn serve_set_wallpaper(fit: &str, path: &str) -> String {
         return format!(r#"{{"error":"file not found: {}"}}"#, path);
     }
     if set_wallpaper(path, fit) {
+        // Auto-stop slideshow on successful manual wallpaper change
+        slideshow_cancel();
         r#"{"ok":true}"#.to_string()
     } else {
         r#"{"error":"failed to set wallpaper"}"#.to_string()
@@ -2171,7 +2228,11 @@ fn serve_set_wallpaper_one(index: usize, fit: &str, path: &str) -> String {
         return format!(r#"{{"error":"file not found: {}"}}"#, path);
     }
     match set_wallpaper_one(index, path, fit) {
-        Ok(()) => r#"{"ok":true}"#.to_string(),
+        Ok(()) => {
+            // Auto-stop slideshow on successful manual wallpaper change
+            slideshow_cancel();
+            r#"{"ok":true}"#.to_string()
+        }
         Err(msg) => format!(r#"{{"error":"{}"}}"#, msg),
     }
 }
@@ -2490,6 +2551,259 @@ fn is_wallpaper_supported() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+// =========================================================================
+// Wallpaper slideshow — cycles through images in a folder on a timer.
+// Only one slideshow active at a time. Starting a new one cancels the old.
+// Manual wallpaper changes auto-stop any running slideshow.
+// State: Mutex-guarded struct + AtomicBool cancel flag + background thread.
+// =========================================================================
+
+/// Valid image extensions for slideshow folder scanning.
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "bmp", "tiff", "tif", "gif", "heic", "webp",
+];
+
+/// Persistent slideshow state — protected by a static Mutex.
+struct SlideshowState {
+    running: bool,
+    cancel: Arc<AtomicBool>,
+    folder: String,
+    interval_minutes: u64,
+    order: String,
+    fit: String,
+    images: Vec<String>,
+    current_index: usize,
+}
+
+impl Default for SlideshowState {
+    fn default() -> Self {
+        SlideshowState {
+            running: false,
+            cancel: Arc::new(AtomicBool::new(false)),
+            folder: String::new(),
+            interval_minutes: 0,
+            order: String::new(),
+            fit: String::new(),
+            images: Vec::new(),
+            current_index: 0,
+        }
+    }
+}
+
+static SLIDESHOW: std::sync::Mutex<Option<SlideshowState>> = std::sync::Mutex::new(None);
+
+/// Scan a folder for valid image files, sorted alphabetically.
+fn scan_images(folder: &str) -> Vec<String> {
+    let dir = match std::fs::read_dir(folder) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    let mut images: Vec<String> = dir
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path().extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| IMAGE_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
+                .unwrap_or(false)
+        })
+        .filter_map(|e| e.path().to_str().map(String::from))
+        .collect();
+    images.sort();
+    images
+}
+
+/// Cancel any currently running slideshow. Sets the cancel flag so the timer thread exits.
+fn slideshow_cancel() {
+    let mut guard = SLIDESHOW.lock().unwrap();
+    if let Some(state) = guard.as_ref() {
+        state.cancel.store(true, Ordering::SeqCst);
+    }
+    *guard = None;
+}
+
+/// Start a wallpaper slideshow. Cancels any existing slideshow first.
+/// Returns JSON response with image count and first image, or error.
+fn slideshow_start(interval: u64, order: &str, fit: &str, folder: &str) -> String {
+    // Validate parameters
+    if interval < 5 {
+        return r#"{"error":"interval must be at least 5 minutes"}"#.to_string();
+    }
+    if !validate_fit(fit) {
+        return format!(r#"{{"error":"invalid fit mode: '{}'. Valid: fill, fit, stretch, center, tile"}}"#, fit);
+    }
+    if !["forward", "backward", "random"].contains(&order) {
+        return format!(r#"{{"error":"invalid order: '{}'. Valid: forward, backward, random"}}"#, order);
+    }
+    if !std::path::Path::new(folder).is_dir() {
+        return format!(r#"{{"error":"folder not found: {}"}}"#, folder);
+    }
+
+    let mut images = scan_images(folder);
+    if images.is_empty() {
+        return r#"{"error":"no valid images found in folder"}"#.to_string();
+    }
+
+    // Sort/shuffle based on order
+    match order {
+        "backward" => images.reverse(),
+        "random" => shuffle(&mut images),
+        _ => {} // "forward" — already sorted alphabetically
+    }
+
+    // Cancel any existing slideshow
+    slideshow_cancel();
+
+    let first_image = images[0].clone();
+    let fit_owned = fit.to_string();
+    let order_owned = order.to_string();
+    let folder_owned = folder.to_string();
+
+    // Set the first image immediately
+    if !set_wallpaper(&first_image, fit) {
+        return r#"{"error":"failed to set first wallpaper"}"#.to_string();
+    }
+
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let cancel_clone = cancel_flag.clone();
+    let images_count = images.len();
+
+    // Store state
+    {
+        let mut guard = SLIDESHOW.lock().unwrap();
+        *guard = Some(SlideshowState {
+            running: true,
+            cancel: cancel_flag,
+            folder: folder_owned.clone(),
+            interval_minutes: interval,
+            order: order_owned.clone(),
+            fit: fit_owned.clone(),
+            images: images.clone(),
+            current_index: 0,
+        });
+    }
+
+    // Spawn background timer thread
+    thread::spawn(move || {
+        let interval_secs = interval * 60;
+        let mut idx = 0usize;
+
+        loop {
+            // Sleep in 1-second increments so we can check cancel flag frequently
+            for _ in 0..interval_secs {
+                if cancel_clone.load(Ordering::SeqCst) { return; }
+                thread::sleep(Duration::from_secs(1));
+            }
+            if cancel_clone.load(Ordering::SeqCst) { return; }
+
+            // Re-scan folder for forward/backward (picks up new/deleted files)
+            let mut current_images = if order_owned == "random" {
+                images.clone() // random: only reshuffle after full cycle
+            } else {
+                let mut fresh = scan_images(&folder_owned);
+                if fresh.is_empty() {
+                    // Folder empty/gone — auto-stop
+                    let mut guard = SLIDESHOW.lock().unwrap();
+                    *guard = None;
+                    return;
+                }
+                if order_owned == "backward" { fresh.reverse(); }
+                fresh
+            };
+
+            // Advance index
+            idx += 1;
+            if idx >= current_images.len() {
+                if order_owned == "random" {
+                    // Reshuffle and rescan for new images
+                    current_images = scan_images(&folder_owned);
+                    if current_images.is_empty() {
+                        let mut guard = SLIDESHOW.lock().unwrap();
+                        *guard = None;
+                        return;
+                    }
+                    shuffle(&mut current_images);
+                    images = current_images.clone();
+                }
+                idx = 0;
+            }
+
+            if idx >= current_images.len() { continue; }
+
+            let img = &current_images[idx];
+
+            // Skip if file no longer exists
+            if !std::path::Path::new(img).exists() { continue; }
+
+            // Set wallpaper (serialized — the Mutex in SLIDESHOW prevents interleaving)
+            let _ = set_wallpaper(img, &fit_owned);
+
+            // Update state
+            if let Ok(mut guard) = SLIDESHOW.lock() {
+                if let Some(state) = guard.as_mut() {
+                    state.current_index = idx;
+                    state.images = current_images;
+                }
+            }
+        }
+    });
+
+    serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "total_images": images_count,
+        "current_image": first_image
+    })).unwrap()
+}
+
+/// Stop the active slideshow. Returns JSON with whether it was running.
+fn slideshow_stop() -> String {
+    let was_running = {
+        let guard = SLIDESHOW.lock().unwrap();
+        guard.as_ref().map_or(false, |s| s.running)
+    };
+    slideshow_cancel();
+    format!(r#"{{"ok":true,"was_running":{}}}"#, was_running)
+}
+
+/// Query the current slideshow state. Returns full status JSON.
+fn slideshow_status() -> String {
+    let guard = SLIDESHOW.lock().unwrap();
+    match guard.as_ref() {
+        Some(state) if state.running => {
+            let current_image = state.images.get(state.current_index)
+                .cloned().unwrap_or_default();
+            serde_json::to_string(&serde_json::json!({
+                "running": true,
+                "folder": state.folder,
+                "interval_minutes": state.interval_minutes,
+                "order": state.order,
+                "fit": state.fit,
+                "current_image": current_image,
+                "current_index": state.current_index,
+                "total_images": state.images.len()
+            })).unwrap()
+        }
+        _ => r#"{"running":false}"#.to_string(),
+    }
+}
+
+/// Simple Fisher-Yates shuffle using a basic LCG PRNG seeded from system time.
+fn shuffle(items: &mut Vec<String>) {
+    let len = items.len();
+    if len <= 1 { return; }
+    // Seed from system time nanoseconds
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let mut rng = seed;
+    for i in (1..len).rev() {
+        // LCG: rng = (rng * 6364136223846793005 + 1442695040888963407) mod 2^64
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let j = (rng >> 33) as usize % (i + 1);
+        items.swap(i, j);
+    }
 }
 
 // =========================================================================
@@ -3209,5 +3523,147 @@ mod tests {
             let json = serve_set_wallpaper_one(0, bad_fit, "/some/path.jpg");
             assert!(json.contains("error"), "expected error for fit mode: {}", bad_fit);
         }
+    }
+
+    // --- Slideshow ---
+
+    #[test]
+    fn slideshow_start_interval_too_low() {
+        let json = slideshow_start(4, "forward", "fill", "/tmp");
+        assert!(json.contains("error"));
+        assert!(json.contains("at least 5 minutes"));
+    }
+
+    #[test]
+    fn slideshow_start_invalid_order() {
+        let json = slideshow_start(5, "shuffle", "fill", "/tmp");
+        assert!(json.contains("error"));
+        assert!(json.contains("invalid order"));
+    }
+
+    #[test]
+    fn slideshow_start_invalid_fit() {
+        let json = slideshow_start(5, "forward", "zoom", "/tmp");
+        assert!(json.contains("error"));
+        assert!(json.contains("invalid fit mode"));
+    }
+
+    #[test]
+    fn slideshow_start_folder_not_found() {
+        let json = slideshow_start(5, "forward", "fill", "/nonexistent/path/that/does/not/exist");
+        assert!(json.contains("error"));
+        assert!(json.contains("folder not found"));
+    }
+
+    #[test]
+    fn slideshow_start_empty_folder() {
+        let dir = std::env::temp_dir().join("display_dj_test_empty_slideshow");
+        let _ = std::fs::create_dir_all(&dir);
+        let json = slideshow_start(5, "forward", "fill", dir.to_str().unwrap());
+        assert!(json.contains("error"));
+        assert!(json.contains("no valid images"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn slideshow_stop_when_not_running() {
+        // Ensure nothing is running
+        slideshow_cancel();
+        let json = slideshow_stop();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["was_running"], false);
+    }
+
+    #[test]
+    fn slideshow_status_when_not_running() {
+        slideshow_cancel();
+        let json = slideshow_status();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["running"], false);
+    }
+
+    #[test]
+    fn scan_images_empty_dir() {
+        let dir = std::env::temp_dir().join("display_dj_test_scan_empty");
+        let _ = std::fs::create_dir_all(&dir);
+        let images = scan_images(dir.to_str().unwrap());
+        assert!(images.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_images_with_valid_files() {
+        let dir = std::env::temp_dir().join("display_dj_test_scan_valid");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("a.jpg"), "fake").unwrap();
+        std::fs::write(dir.join("b.png"), "fake").unwrap();
+        std::fs::write(dir.join("c.txt"), "not image").unwrap();
+        std::fs::write(dir.join("d.bmp"), "fake").unwrap();
+        let images = scan_images(dir.to_str().unwrap());
+        assert_eq!(images.len(), 3);
+        // Should be sorted alphabetically
+        assert!(images[0].ends_with("a.jpg"));
+        assert!(images[1].ends_with("b.png"));
+        assert!(images[2].ends_with("d.bmp"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_images_nonexistent_dir() {
+        let images = scan_images("/nonexistent/dir/that/does/not/exist");
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn scan_images_case_insensitive_extensions() {
+        let dir = std::env::temp_dir().join("display_dj_test_scan_case");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("a.JPG"), "fake").unwrap();
+        std::fs::write(dir.join("b.Png"), "fake").unwrap();
+        std::fs::write(dir.join("c.HEIC"), "fake").unwrap();
+        let images = scan_images(dir.to_str().unwrap());
+        assert_eq!(images.len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn image_extensions_constant() {
+        assert!(IMAGE_EXTENSIONS.contains(&"jpg"));
+        assert!(IMAGE_EXTENSIONS.contains(&"jpeg"));
+        assert!(IMAGE_EXTENSIONS.contains(&"png"));
+        assert!(IMAGE_EXTENSIONS.contains(&"bmp"));
+        assert!(IMAGE_EXTENSIONS.contains(&"tiff"));
+        assert!(IMAGE_EXTENSIONS.contains(&"tif"));
+        assert!(IMAGE_EXTENSIONS.contains(&"gif"));
+        assert!(IMAGE_EXTENSIONS.contains(&"heic"));
+        assert!(IMAGE_EXTENSIONS.contains(&"webp"));
+        assert!(!IMAGE_EXTENSIONS.contains(&"txt"));
+        assert!(!IMAGE_EXTENSIONS.contains(&"pdf"));
+    }
+
+    #[test]
+    fn shuffle_does_not_lose_elements() {
+        let mut items: Vec<String> = (0..10).map(|i| format!("item_{}", i)).collect();
+        let original = items.clone();
+        shuffle(&mut items);
+        assert_eq!(items.len(), original.len());
+        for item in &original {
+            assert!(items.contains(item));
+        }
+    }
+
+    #[test]
+    fn shuffle_single_element() {
+        let mut items = vec!["only".to_string()];
+        shuffle(&mut items);
+        assert_eq!(items, vec!["only"]);
+    }
+
+    #[test]
+    fn shuffle_empty() {
+        let mut items: Vec<String> = vec![];
+        shuffle(&mut items);
+        assert!(items.is_empty());
     }
 }
