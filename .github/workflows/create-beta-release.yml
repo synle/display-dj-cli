@@ -1,0 +1,197 @@
+name: Beta Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.info.outputs.sha }}
+      tag: ${{ steps.info.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get build info
+        id: info
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "tag=beta-${SHA}" >> "$GITHUB_OUTPUT"
+          echo "Beta build for commit: ${SHA}"
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: display-dj-macos-arm64
+            run_tests: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: display-dj-macos-x64
+            run_tests: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: display-dj-windows-x64
+            run_tests: true
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact: display-dj-windows-arm64
+            run_tests: false
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: display-dj-linux-x64
+            run_tests: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: display-dj-linux-arm64
+            run_tests: false
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.artifact }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
+
+      - name: Run tests
+        if: matrix.run_tests
+        run: cargo test
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare artifact (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cp target/${{ matrix.target }}/release/display-dj ${{ matrix.artifact }}
+          chmod +x ${{ matrix.artifact }}
+
+      - name: Prepare artifact (Windows)
+        if: runner.os == 'Windows'
+        run: cp target/${{ matrix.target }}/release/display-dj.exe ${{ matrix.artifact }}.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}*
+
+  release:
+    needs: [prepare, build]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Delete existing beta release for this SHA
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          git tag -d "$TAG" 2>/dev/null || true
+
+      - name: Determine build status
+        id: status
+        run: |
+          if [ "${{ needs.build.result }}" = "success" ]; then
+            echo "suffix=[Success]" >> "$GITHUB_OUTPUT"
+            echo "failed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "suffix=[Error]" >> "$GITHUB_OUTPUT"
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download artifacts
+        if: needs.build.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        if: needs.build.result == 'success'
+        run: find artifacts -type f | sort
+
+      - name: Generate release body
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          REPO: ${{ github.repository }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          > body.md
+          echo "Beta build from commit \`${SHA}\` on \`main\`" >> body.md
+          echo "" >> body.md
+          echo "**Build status:** ${BUILD_RESULT}" >> body.md
+          echo "" >> body.md
+          echo "## Recent commits" >> body.md
+          echo "" >> body.md
+          git log --pretty=format:'- `%h` %s' --no-merges -5 >> body.md
+          echo "" >> body.md
+          echo "" >> body.md
+          if [ "$BUILD_RESULT" = "success" ]; then
+            echo "## Downloads" >> body.md
+            echo "" >> body.md
+            echo "| Asset | Platform |" >> body.md
+            echo "|-------|----------|" >> body.md
+            echo "| [\`display-dj-macos-arm64\`](https://github.com/${REPO}/releases/download/${TAG}/display-dj-macos-arm64) | macOS Apple Silicon |" >> body.md
+            echo "| [\`display-dj-macos-x64\`](https://github.com/${REPO}/releases/download/${TAG}/display-dj-macos-x64) | macOS Intel |" >> body.md
+            echo "| [\`display-dj-windows-x64.exe\`](https://github.com/${REPO}/releases/download/${TAG}/display-dj-windows-x64.exe) | Windows x64 |" >> body.md
+            echo "| [\`display-dj-windows-arm64.exe\`](https://github.com/${REPO}/releases/download/${TAG}/display-dj-windows-arm64.exe) | Windows ARM64 |" >> body.md
+            echo "| [\`display-dj-linux-x64\`](https://github.com/${REPO}/releases/download/${TAG}/display-dj-linux-x64) | Linux x64 |" >> body.md
+            echo "| [\`display-dj-linux-arm64\`](https://github.com/${REPO}/releases/download/${TAG}/display-dj-linux-arm64) | Linux ARM64 |" >> body.md
+          else
+            echo "> **This beta build failed.** This release will be cleaned up automatically." >> body.md
+          fi
+
+      - name: Create beta release (success)
+        if: needs.build.result == 'success'
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          TITLE: display-dj ${{ needs.prepare.outputs.tag }} ${{ steps.status.outputs.suffix }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --notes-file body.md \
+            --draft \
+            artifacts/display-dj-macos-arm64/display-dj-macos-arm64 \
+            artifacts/display-dj-macos-x64/display-dj-macos-x64 \
+            artifacts/display-dj-windows-x64/display-dj-windows-x64.exe \
+            artifacts/display-dj-windows-arm64/display-dj-windows-arm64.exe \
+            artifacts/display-dj-linux-x64/display-dj-linux-x64 \
+            artifacts/display-dj-linux-arm64/display-dj-linux-arm64
+
+      - name: Create beta release (error)
+        if: needs.build.result != 'success'
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          TITLE: display-dj ${{ needs.prepare.outputs.tag }} ${{ steps.status.outputs.suffix }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --notes-file body.md \
+            --draft

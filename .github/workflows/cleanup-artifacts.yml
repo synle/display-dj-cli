@@ -79,8 +79,8 @@ jobs:
 
             console.log(`\nArtifacts — Kept runs: ${keepRunIds.size}, Deleted artifacts: ${toDelete.length}`);
 
-            // --- Cleanup Draft Releases ---
-            console.log(`\n=== Draft Release Cleanup ===\n`);
+            // --- Cleanup Draft Releases and [Error] Beta Releases ---
+            console.log(`\n=== Release Cleanup (drafts + [Error] betas) ===\n`);
 
             const releases = await github.paginate(
               github.rest.repos.listReleases,
@@ -91,18 +91,35 @@ jobs:
               }
             );
 
-            const drafts = releases.filter(r => r.draft);
+            // Delete drafts and any release with [Error] in the title
+            const toDeleteReleases = releases.filter(r =>
+              r.draft || (r.name && r.name.includes('[Error]'))
+            );
 
-            for (const draft of drafts) {
-              console.log(`Deleting draft release: ${draft.name || draft.tag_name} (created: ${draft.created_at})`);
+            for (const rel of toDeleteReleases) {
+              const reason = rel.name && rel.name.includes('[Error]') ? '[Error] beta' : 'draft';
+              console.log(`Deleting ${reason} release: ${rel.name || rel.tag_name} (created: ${rel.created_at})`);
               await github.rest.repos.deleteRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                release_id: draft.id,
+                release_id: rel.id,
               });
+              // Also clean up the tag for [Error] beta releases
+              if (rel.tag_name) {
+                try {
+                  await github.rest.git.deleteRef({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    ref: `tags/${rel.tag_name}`,
+                  });
+                  console.log(`  Deleted tag: ${rel.tag_name}`);
+                } catch (e) {
+                  // Tag may already be gone
+                }
+              }
             }
 
-            console.log(`\nDraft releases deleted: ${drafts.length}`);
+            console.log(`\nReleases deleted: ${toDeleteReleases.length}`);
 
             // --- Cleanup Old Workflow Runs ---
             console.log(`\n=== Workflow Run Cleanup (older than ${KEEP_RUNS_DAYS} days) ===\n`);
