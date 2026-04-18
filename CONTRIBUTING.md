@@ -592,7 +592,7 @@ All routes are `GET` with path-based parameters. No query strings, no POST bodie
 | `/light` | Switch to light mode | `{status}` |
 | `/theme` | Get current theme | `{theme}` |
 | `/reset` | Reset gamma to defaults | `{status}` |
-| `/health` | Health check | `{status: "ok"}` |
+| `/health` | Health check | `{status: "ok", pid, uptime}` |
 | `/set_contrast_all/<level>` | Set contrast on all (DDC only) | `[{id, name, status}]` |
 | `/set_contrast_one/<id>/<level>` | Set contrast on one (DDC only) | `{id, name, status}` |
 | `/debug` | Full diagnostics with active tests | `{displays, scale, platform, tests}` |

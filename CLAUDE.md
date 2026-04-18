@@ -124,9 +124,10 @@ display-dj debug
 display-dj serve [port]
 ```
 
-### Server keep-awake endpoints
+### Server endpoints (selected)
 
 ```
+GET  /health              → {"status":"ok","pid":1234,"uptime":42}
 GET  /keep_awake          → {"enabled": true/false}
 POST /keep_awake/enable   → {"status":"ok","enabled":true}
 POST /keep_awake/disable  → {"status":"ok","enabled":false}

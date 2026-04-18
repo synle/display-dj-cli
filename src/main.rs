@@ -593,7 +593,9 @@ fn maybe_keep_alive(mode: &str) {
 fn cmd_serve<P: Platform>(port: u16) {
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
+    use std::time::Instant;
 
+    let started = Instant::now();
     let addr = format!("127.0.0.1:{}", port);
     let listener = TcpListener::bind(&addr).unwrap_or_else(|e| {
         eprintln!("Failed to bind to {}: {}", addr, e);
@@ -654,7 +656,7 @@ fn cmd_serve<P: Platform>(port: u16) {
                     "/reset", "/health", "/debug"
                 ]
             })).unwrap(),
-            "health" => r#"{"status":"ok"}"#.to_string(),
+            "health" => serve_health(&started),
             "debug" => serve_debug::<P>(),
             "list" => serve_list::<P>(),
             "get_all" => serve_get::<P>(None),
@@ -746,6 +748,15 @@ fn write_http(stream: &mut std::net::TcpStream, status: u16, body: &str) -> std:
         "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         status, reason, body.len(), body
     )
+}
+
+/// HTTP handler for /health — returns server status, process ID, and uptime in seconds.
+fn serve_health(started: &std::time::Instant) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "status": "ok",
+        "pid": std::process::id(),
+        "uptime": started.elapsed().as_secs()
+    })).unwrap()
 }
 
 /// HTTP handler for /list — returns all displays as a JSON array (no live re-reads).
@@ -2585,5 +2596,17 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["id"], "builtin");
         assert_eq!(parsed["status"], "ok");
+    }
+
+    // --- Health ---
+
+    #[test]
+    fn serve_health_returns_status_pid_uptime() {
+        let started = std::time::Instant::now();
+        let json = serve_health(&started);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["status"], "ok");
+        assert!(parsed["pid"].is_u64());
+        assert!(parsed["uptime"].is_u64());
     }
 }
