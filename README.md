@@ -2,7 +2,7 @@
 
 [![Build Release Binaries](https://github.com/synle/display-dj-cli/actions/workflows/build.yml/badge.svg)](https://github.com/synle/display-dj-cli/actions/workflows/build.yml)
 
-Cross-platform CLI for controlling monitor brightness, display scaling, system volume, dark mode, and keep-awake.
+Cross-platform CLI for controlling monitor brightness, display scaling, system volume, dark mode, keep-awake, and desktop wallpaper.
 
 Supports **macOS**, **Windows**, and **Linux** (X11 + Wayland).
 
@@ -58,6 +58,9 @@ display-dj set_scale_one <id> <percent> # Set one display scaling (75-300)
 display-dj keep_awake_on                # Prevent system sleep (blocks until Ctrl+C)
 display-dj keep_awake_off               # Stop preventing system sleep
 display-dj get_keep_awake               # Get keep-awake status (JSON)
+display-dj set_wallpaper <fit> <path>   # Set wallpaper (fit: fill/fit/stretch/center/tile)
+display-dj get_wallpaper                # Get current wallpaper (JSON)
+display-dj get_wallpaper_supported      # Check wallpaper support (JSON)
 display-dj debug                        # Dump diagnostics for all displays (JSON)
 display-dj serve [port]                 # Start HTTP server (default: 51337)
 ```
@@ -86,6 +89,9 @@ display-dj set_scale_one builtin 200    # set built-in to 200% (Retina)
 display-dj keep_awake_on                # prevent sleep (Ctrl+C to stop)
 display-dj get_keep_awake               # check keep-awake status
 display-dj keep_awake_off               # stop preventing sleep
+display-dj set_wallpaper fill ~/pic.jpg # set wallpaper with fill mode
+display-dj get_wallpaper                # get current wallpaper path + fit
+display-dj get_wallpaper_supported      # check if wallpaper is supported
 display-dj debug                        # dump full diagnostics (active tests + raw platform data)
 display-dj serve                        # start HTTP server on port 51337
 ```
@@ -157,6 +163,11 @@ curl localhost:51337/keep_awake
 curl localhost:51337/keep_awake/enable
 curl localhost:51337/keep_awake/disable
 
+# Wallpaper
+curl localhost:51337/set_wallpaper/fill/Users/syle/Pictures/bg.jpg
+curl localhost:51337/get_wallpaper
+curl localhost:51337/get_wallpaper_supported
+
 # Utility
 curl localhost:51337/reset
 curl localhost:51337/health
@@ -212,6 +223,7 @@ curl -s localhost:51337/get_all | jq '.[].brightness'
 | Volume | `osascript` (`get volume settings` / `set volume output volume`) |
 | Scaling | CoreGraphics native FFI (`CGDisplayCopyAllDisplayModes` / `CGDisplaySetDisplayMode`) |
 | Keep-awake | `caffeinate -di` child process (pre-installed) |
+| Wallpaper | `osascript` (System Events — set picture on every desktop) |
 
 Works on macOS 11+ (Big Sur and later). Apple Silicon and Intel.
 
@@ -228,6 +240,7 @@ Works on macOS 11+ (Big Sur and later). Apple Silicon and Intel.
 | Volume | PowerShell + COM `IAudioEndpointVolume` |
 | Scaling | Registry DPI (`LogPixels`) — requires logout to apply |
 | Keep-awake | `SetThreadExecutionState` Win32 API (no external deps) |
+| Wallpaper | Registry (`WallpaperStyle` + `TileWallpaper`) + `SystemParametersInfoW` via PowerShell |
 
 Works on Windows 10 and later.
 
@@ -248,6 +261,7 @@ Works on Windows 10 and later.
 | Scaling (X11) | `xrandr --scale` | `xrandr` (usually pre-installed) |
 | Scaling (Wayland) | `wlr-randr --scale` | `wlr-randr` |
 | Keep-awake | `systemd-inhibit` child process | `systemd` (pre-installed on most distros) |
+| Wallpaper | `gsettings` (GNOME), `xfconf-query` (XFCE), `feh` fallback | Desktop-dependent |
 
 #### Ubuntu / Debian
 

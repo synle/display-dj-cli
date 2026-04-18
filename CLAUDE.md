@@ -1,6 +1,6 @@
 # display-dj
 
-Cross-platform CLI for monitor brightness, display scaling, system volume, and dark mode control.
+Cross-platform CLI for monitor brightness, display scaling, system volume, dark mode, keep-awake, and desktop wallpaper control.
 
 See [DEV.md](DEV.md) for the full developer guide (architecture diagrams, build instructions, request lifecycle, where to edit).
 
@@ -24,6 +24,7 @@ Dark mode, volume, and scaling live directly in `main.rs` behind `#[cfg(target_o
 5. **Volume**: `osascript` — `get volume settings` / `set volume output volume`.
 6. **Scaling**: CoreGraphics native FFI — `CGDisplayCopyAllDisplayModes` to enumerate modes, `CGDisplaySetDisplayMode` to switch. Scale = `CGDisplayModeGetPixelWidth / CGDisplayModeGetWidth`. No external deps.
 7. **Keep-awake**: `caffeinate -di` as a child process. `-d` prevents display sleep, `-i` prevents idle sleep. Kill the child to disable.
+8. **Wallpaper**: `osascript` via System Events (`tell every desktop to set picture`). Fit mode is best-effort via System Events.
 
 ### Windows (`src/windows.rs` + `main.rs`)
 
@@ -35,6 +36,7 @@ Dark mode, volume, and scaling live directly in `main.rs` behind `#[cfg(target_o
 6. **Volume**: PowerShell `AudioDeviceCmdlets` module. Requires one-time setup: `Install-Module -Name AudioDeviceCmdlets`.
 7. **Scaling**: Registry DPI (`LogPixels` + `Win8DpiScaling`). Requires logout to apply.
 8. **Keep-awake**: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)` via Win32 API. Reset with `SetThreadExecutionState(ES_CONTINUOUS)`.
+9. **Wallpaper**: Registry keys (`WallpaperStyle` + `TileWallpaper`) for fit mode + `SystemParametersInfoW(SPI_SETDESKWALLPAPER)` via PowerShell P/Invoke. Fit mapping: fill→Style=10/Tile=0, fit→Style=6/Tile=0, stretch→Style=2/Tile=0, center→Style=0/Tile=0, tile→Style=0/Tile=1.
 
 ### Linux (`src/linux.rs` + `main.rs`)
 
@@ -49,6 +51,7 @@ Dark mode, volume, and scaling live directly in `main.rs` behind `#[cfg(target_o
 9. **Scaling (X11)**: `xrandr --scale`. Uses inverse scale (100%/target) since xrandr scales the framebuffer.
 10. **Scaling (Wayland)**: `wlr-randr --scale`. Direct scale factor.
 11. **Keep-awake**: `systemd-inhibit --what=idle --who=display-dj --why=KeepAwake sleep infinity` as a child process. Kill to disable.
+12. **Wallpaper**: Tries in order: `gsettings` (GNOME — `picture-uri` + `picture-options`), `xfconf-query` (XFCE), `feh` fallback. Fit mapping: fill→`zoom`, fit→`scaled`, stretch→`stretched`, center→`centered`, tile→`wallpaper`.
 
 ### Windows display dedup (builtin duplicate elimination)
 
@@ -117,6 +120,11 @@ display-dj keep_awake_on
 display-dj keep_awake_off
 display-dj get_keep_awake
 
+# Wallpaper
+display-dj set_wallpaper <fit> <path>
+display-dj get_wallpaper
+display-dj get_wallpaper_supported
+
 # Diagnostics
 display-dj debug
 
@@ -131,6 +139,9 @@ GET  /health              → {"status":"ok","pid":1234,"uptime":42}
 GET  /keep_awake          → {"enabled": true/false}
 POST /keep_awake/enable   → {"status":"ok","enabled":true}
 POST /keep_awake/disable  → {"status":"ok","enabled":false}
+GET  /set_wallpaper/<fit>/<path> → {"ok":true}
+GET  /get_wallpaper       → {"path":"...","fit":"fill"}
+GET  /get_wallpaper_supported → {"supported":true}
 ```
 
 ## GitHub Raw File URLs

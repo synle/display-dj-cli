@@ -84,6 +84,9 @@ fn usage() {
     eprintln!("  display-dj keep_awake_on                Prevent system sleep (blocks until Ctrl+C)");
     eprintln!("  display-dj keep_awake_off               Stop preventing system sleep");
     eprintln!("  display-dj get_keep_awake               Get keep-awake status (JSON)");
+    eprintln!("  display-dj set_wallpaper <fit> <path>   Set wallpaper (fit: fill/fit/stretch/center/tile)");
+    eprintln!("  display-dj get_wallpaper                Get current wallpaper (JSON)");
+    eprintln!("  display-dj get_wallpaper_supported      Check wallpaper support (JSON)");
     eprintln!("  display-dj debug                        Dump debug info for all displays (JSON)");
     eprintln!("  display-dj serve [port]                 Start HTTP server (default: 51337)");
     eprintln!();
@@ -236,6 +239,19 @@ fn dispatch<P: Platform>(cmd: &str, args: &[String]) {
         "keep_awake_on" => cmd_keep_awake_on(),
         "keep_awake_off" => cmd_keep_awake_off(),
         "get_keep_awake" => cmd_get_keep_awake(),
+        "set_wallpaper" => {
+            let fit = args.get(2).map(|s| s.as_str()).unwrap_or_else(|| {
+                usage();
+                std::process::exit(1);
+            });
+            let path = args.get(3).map(|s| s.as_str()).unwrap_or_else(|| {
+                usage();
+                std::process::exit(1);
+            });
+            cmd_set_wallpaper(fit, path);
+        }
+        "get_wallpaper" => cmd_get_wallpaper(),
+        "get_wallpaper_supported" => cmd_get_wallpaper_supported(),
         "serve" => {
             let port: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(51337);
             cmd_serve::<P>(port);
@@ -610,6 +626,7 @@ fn cmd_serve<P: Platform>(port: u16) {
     eprintln!("         /get_volume  /set_volume/<level>  /mute  /unmute");
     eprintln!("         /keep_awake  /keep_awake/enable  /keep_awake/disable");
     eprintln!("         /get_scale  /set_scale_all/<percent>  /set_scale_one/<id>/<percent>");
+    eprintln!("         /set_wallpaper/<fit>/<path>  /get_wallpaper  /get_wallpaper_supported");
     eprintln!();
     eprintln!("Example: curl http://{}:{}/set_all/50", "127.0.0.1", port);
 
@@ -653,6 +670,7 @@ fn cmd_serve<P: Platform>(port: u16) {
                     "/get_volume", "/set_volume/<level>", "/mute", "/unmute",
                     "/keep_awake", "/keep_awake/enable", "/keep_awake/disable",
                     "/get_scale", "/set_scale_all/<percent>", "/set_scale_one/<id>/<percent>",
+                    "/set_wallpaper/<fit>/<path>", "/get_wallpaper", "/get_wallpaper_supported",
                     "/reset", "/health", "/debug"
                 ]
             })).unwrap(),
@@ -727,6 +745,19 @@ fn cmd_serve<P: Platform>(port: u16) {
                     _ => r#"{"error":"usage: /set_scale_one/<id>/<percent>"}"#.to_string(),
                 }
             }
+            "set_wallpaper" => {
+                let fit = segments.get(1).copied().unwrap_or("");
+                if segments.len() < 3 {
+                    r#"{"error":"usage: /set_wallpaper/<fit>/<path>"}"#.to_string()
+                } else {
+                    // Rejoin remaining segments to reconstruct the absolute path
+                    let path = format!("/{}", segments[2..].join("/"));
+                    let path = url_decode(&path);
+                    serve_set_wallpaper(fit, &path)
+                }
+            }
+            "get_wallpaper" => serve_get_wallpaper(),
+            "get_wallpaper_supported" => serve_get_wallpaper_supported(),
             _ => {
                 let _ = write_http(&mut stream, 404, r#"{"error":"not found"}"#);
                 continue;
@@ -1994,6 +2025,341 @@ fn serve_keep_awake_disable() -> String {
 }
 
 // =========================================================================
+// Wallpaper — set/get desktop wallpaper with fit mode control.
+// macOS: osascript (System Events). Windows: registry + SystemParametersInfoW.
+// Linux: gsettings (GNOME), xfconf-query (XFCE), feh fallback.
+// =========================================================================
+
+/// Valid wallpaper fit/scaling modes. The CLI rejects unknown values.
+const VALID_FITS: &[&str] = &["fill", "fit", "stretch", "center", "tile"];
+
+/// Check if a fit mode string is valid.
+fn validate_fit(fit: &str) -> bool {
+    VALID_FITS.contains(&fit)
+}
+
+/// Current wallpaper state — path and fit mode. Returned by get_wallpaper and /get_wallpaper.
+#[derive(Serialize)]
+struct WallpaperInfo {
+    path: Option<String>,
+    fit: Option<String>,
+}
+
+// --- CLI handlers ---
+
+/// CLI handler for `set_wallpaper <fit> <path>` — sets wallpaper with the given fit mode.
+fn cmd_set_wallpaper(fit: &str, path: &str) {
+    if !validate_fit(fit) {
+        eprintln!("Invalid fit mode: \"{}\". Valid: fill, fit, stretch, center, tile", fit);
+        std::process::exit(1);
+    }
+    if !std::path::Path::new(path).exists() {
+        eprintln!("File not found: {}", path);
+        std::process::exit(1);
+    }
+    if set_wallpaper(path, fit) {
+        eprintln!("Wallpaper set to {} (fit: {}).", path, fit);
+    } else {
+        eprintln!("Failed to set wallpaper.");
+        std::process::exit(1);
+    }
+}
+
+/// CLI handler for `get_wallpaper` — outputs {"path": "...", "fit": "..."} to stdout.
+fn cmd_get_wallpaper() {
+    match get_wallpaper() {
+        Some(info) => println!("{}", serde_json::to_string_pretty(&info).unwrap()),
+        None => {
+            let info = WallpaperInfo { path: None, fit: None };
+            println!("{}", serde_json::to_string_pretty(&info).unwrap());
+        }
+    }
+}
+
+/// CLI handler for `get_wallpaper_supported` — outputs {"supported": true/false} to stdout.
+fn cmd_get_wallpaper_supported() {
+    println!(r#"{{"supported":{}}}"#, is_wallpaper_supported());
+}
+
+// --- HTTP handlers ---
+
+/// HTTP handler for /set_wallpaper/<fit>/<path> — sets wallpaper on all monitors.
+fn serve_set_wallpaper(fit: &str, path: &str) -> String {
+    if !validate_fit(fit) {
+        return format!(r#"{{"error":"invalid fit mode: '{}'. Valid: fill, fit, stretch, center, tile"}}"#, fit);
+    }
+    if !std::path::Path::new(path).exists() {
+        return format!(r#"{{"error":"file not found: {}"}}"#, path);
+    }
+    if set_wallpaper(path, fit) {
+        r#"{"ok":true}"#.to_string()
+    } else {
+        r#"{"error":"failed to set wallpaper"}"#.to_string()
+    }
+}
+
+/// HTTP handler for /get_wallpaper — returns current wallpaper path and fit mode.
+fn serve_get_wallpaper() -> String {
+    match get_wallpaper() {
+        Some(info) => serde_json::to_string(&info).unwrap_or_else(|_| r#"{"path":null,"fit":null}"#.into()),
+        None => r#"{"path":null,"fit":null}"#.to_string(),
+    }
+}
+
+/// HTTP handler for /get_wallpaper_supported — returns {"supported": true/false}.
+fn serve_get_wallpaper_supported() -> String {
+    format!(r#"{{"supported":{}}}"#, is_wallpaper_supported())
+}
+
+// --- macOS: osascript via System Events ---
+
+/// Set wallpaper on macOS using System Events AppleScript.
+/// Sets the desktop picture on all desktops/spaces.
+#[cfg(target_os = "macos")]
+fn set_wallpaper(path: &str, _fit: &str) -> bool {
+    // System Events sets the picture on all desktops
+    let script = format!(
+        "tell application \"System Events\" to tell every desktop to set picture to \"{}\"",
+        path
+    );
+    std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Get current wallpaper path on macOS via System Events.
+#[cfg(target_os = "macos")]
+fn get_wallpaper() -> Option<WallpaperInfo> {
+    let output = std::process::Command::new("osascript")
+        .args(["-e", "tell application \"System Events\" to get picture of desktop 1"])
+        .output().ok()?;
+    if !output.status.success() { return None; }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() { return None; }
+    Some(WallpaperInfo { path: Some(path), fit: Some("fill".into()) })
+}
+
+/// macOS always supports wallpaper operations.
+#[cfg(target_os = "macos")]
+fn is_wallpaper_supported() -> bool { true }
+
+// --- Windows: registry + SystemParametersInfoW via PowerShell ---
+
+/// Set wallpaper on Windows. Sets fit mode via registry keys, then applies
+/// the wallpaper using SystemParametersInfoW P/Invoke through PowerShell.
+#[cfg(target_os = "windows")]
+fn set_wallpaper(path: &str, fit: &str) -> bool {
+    // Set fit mode via registry: WallpaperStyle + TileWallpaper
+    let (style, tile) = match fit {
+        "fill" => ("10", "0"),
+        "fit" => ("6", "0"),
+        "stretch" => ("2", "0"),
+        "center" => ("0", "0"),
+        "tile" => ("0", "1"),
+        _ => ("10", "0"), // default to fill
+    };
+    let _ = std::process::Command::new("reg")
+        .args(["add", r"HKCU\Control Panel\Desktop", "/v", "WallpaperStyle", "/t", "REG_SZ", "/d", style, "/f"])
+        .output();
+    let _ = std::process::Command::new("reg")
+        .args(["add", r"HKCU\Control Panel\Desktop", "/v", "TileWallpaper", "/t", "REG_SZ", "/d", tile, "/f"])
+        .output();
+
+    // Set wallpaper via SystemParametersInfoW (SPI_SETDESKWALLPAPER = 0x0014)
+    let escaped_path = path.replace('\'', "''");
+    let cmd = format!(
+        r#"Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public class Wallpaper {{
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
+}}
+'@
+[Wallpaper]::SystemParametersInfo(0x0014, 0, '{}', 0x01 -bor 0x02)
+"#,
+        escaped_path
+    );
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Get current wallpaper on Windows by reading registry keys.
+#[cfg(target_os = "windows")]
+fn get_wallpaper() -> Option<WallpaperInfo> {
+    let output = std::process::Command::new("reg")
+        .args(["query", r"HKCU\Control Panel\Desktop", "/v", "Wallpaper"])
+        .output().ok()?;
+    if !output.status.success() { return None; }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let path = stdout.lines()
+        .find(|l| l.contains("Wallpaper"))
+        .and_then(|l| l.split("REG_SZ").nth(1))
+        .map(|s| s.trim().to_string())?;
+    if path.is_empty() { return None; }
+
+    // Read fit mode from WallpaperStyle + TileWallpaper
+    let style_val = std::process::Command::new("reg")
+        .args(["query", r"HKCU\Control Panel\Desktop", "/v", "WallpaperStyle"])
+        .output().ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout).lines()
+                .find(|l| l.contains("WallpaperStyle"))
+                .and_then(|l| l.split("REG_SZ").nth(1))
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_default();
+    let tile_val = std::process::Command::new("reg")
+        .args(["query", r"HKCU\Control Panel\Desktop", "/v", "TileWallpaper"])
+        .output().ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout).lines()
+                .find(|l| l.contains("TileWallpaper"))
+                .and_then(|l| l.split("REG_SZ").nth(1))
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_default();
+
+    let fit = match (style_val.as_str(), tile_val.as_str()) {
+        ("10", "0") => "fill",
+        ("6", "0") => "fit",
+        ("2", "0") => "stretch",
+        ("0", "1") => "tile",
+        ("0", "0") => "center",
+        _ => "fill",
+    };
+    Some(WallpaperInfo { path: Some(path), fit: Some(fit.into()) })
+}
+
+/// Windows always supports wallpaper operations.
+#[cfg(target_os = "windows")]
+fn is_wallpaper_supported() -> bool { true }
+
+// --- Linux: gsettings (GNOME), xfconf-query (XFCE), feh fallback ---
+
+/// Set wallpaper on Linux. Tries GNOME (gsettings), XFCE (xfconf-query), and feh in order.
+#[cfg(target_os = "linux")]
+fn set_wallpaper(path: &str, fit: &str) -> bool {
+    let gnome_mode = match fit {
+        "fill" => "zoom",
+        "fit" => "scaled",
+        "stretch" => "stretched",
+        "center" => "centered",
+        "tile" => "wallpaper",
+        _ => "zoom",
+    };
+
+    // Try GNOME (gsettings)
+    let mode_ok = std::process::Command::new("gsettings")
+        .args(["set", "org.gnome.desktop.background", "picture-options", gnome_mode])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if mode_ok {
+        let uri = format!("file://{}", path);
+        let set_ok = std::process::Command::new("gsettings")
+            .args(["set", "org.gnome.desktop.background", "picture-uri", &uri])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        // Also set picture-uri-dark for GNOME 42+ dark mode wallpaper
+        let _ = std::process::Command::new("gsettings")
+            .args(["set", "org.gnome.desktop.background", "picture-uri-dark", &uri])
+            .output();
+        if set_ok { return true; }
+    }
+
+    // Try XFCE (xfconf-query)
+    if std::process::Command::new("xfconf-query")
+        .args(["-c", "xfce4-desktop", "-p", "/backdrop/screen0/monitor0/workspace0/last-image", "-s", path])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    // Fallback: feh
+    let feh_mode = match fit {
+        "fill" => "--bg-fill",
+        "fit" => "--bg-max",
+        "stretch" => "--bg-scale",
+        "center" => "--bg-center",
+        "tile" => "--bg-tile",
+        _ => "--bg-fill",
+    };
+    std::process::Command::new("feh")
+        .args([feh_mode, path])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Get current wallpaper on Linux via gsettings (GNOME).
+#[cfg(target_os = "linux")]
+fn get_wallpaper() -> Option<WallpaperInfo> {
+    // Try GNOME
+    let uri_output = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.background", "picture-uri"])
+        .output().ok()?;
+    if uri_output.status.success() {
+        let uri = String::from_utf8_lossy(&uri_output.stdout).trim()
+            .trim_matches('\'').to_string();
+        let path = uri.strip_prefix("file://").unwrap_or(&uri).to_string();
+        if !path.is_empty() {
+            let gnome_mode = std::process::Command::new("gsettings")
+                .args(["get", "org.gnome.desktop.background", "picture-options"])
+                .output().ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_matches('\'').to_string())
+                .unwrap_or_default();
+            let fit = match gnome_mode.as_str() {
+                "zoom" => "fill",
+                "scaled" => "fit",
+                "stretched" => "stretch",
+                "centered" => "center",
+                "wallpaper" => "tile",
+                _ => "fill",
+            };
+            return Some(WallpaperInfo { path: Some(path), fit: Some(fit.into()) });
+        }
+    }
+    None
+}
+
+/// Check if wallpaper operations are supported on this Linux session.
+/// Returns true if any supported DE/tool is available.
+#[cfg(target_os = "linux")]
+fn is_wallpaper_supported() -> bool {
+    // GNOME
+    if std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.background", "picture-uri"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    { return true; }
+    // XFCE
+    if std::process::Command::new("xfconf-query")
+        .args(["--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    { return true; }
+    // feh
+    std::process::Command::new("feh")
+        .args(["--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+// =========================================================================
 // Tests — everything that can be tested without a physical display
 // =========================================================================
 
@@ -2608,5 +2974,83 @@ mod tests {
         assert_eq!(parsed["status"], "ok");
         assert!(parsed["pid"].is_u64());
         assert!(parsed["uptime"].is_u64());
+    }
+
+    // --- Wallpaper ---
+
+    #[test]
+    fn validate_fit_valid_modes() {
+        assert!(validate_fit("fill"));
+        assert!(validate_fit("fit"));
+        assert!(validate_fit("stretch"));
+        assert!(validate_fit("center"));
+        assert!(validate_fit("tile"));
+    }
+
+    #[test]
+    fn validate_fit_invalid_modes() {
+        assert!(!validate_fit(""));
+        assert!(!validate_fit("zoom"));
+        assert!(!validate_fit("FILL"));
+        assert!(!validate_fit("unknown"));
+    }
+
+    #[test]
+    fn valid_fits_constant_has_five_modes() {
+        assert_eq!(VALID_FITS.len(), 5);
+    }
+
+    #[test]
+    fn wallpaper_info_serializes() {
+        let info = WallpaperInfo { path: Some("/path/to/image.jpg".into()), fit: Some("fill".into()) };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"path\":\"/path/to/image.jpg\""));
+        assert!(json.contains("\"fit\":\"fill\""));
+    }
+
+    #[test]
+    fn wallpaper_info_null_fields() {
+        let info = WallpaperInfo { path: None, fit: None };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"path\":null"));
+        assert!(json.contains("\"fit\":null"));
+    }
+
+    #[test]
+    fn serve_get_wallpaper_returns_valid_json() {
+        let json = serve_get_wallpaper();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("path").is_some());
+        assert!(parsed.get("fit").is_some());
+    }
+
+    #[test]
+    fn serve_get_wallpaper_supported_returns_valid_json() {
+        let json = serve_get_wallpaper_supported();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("supported").is_some());
+        assert!(parsed["supported"].is_boolean());
+    }
+
+    #[test]
+    fn serve_set_wallpaper_invalid_fit() {
+        let json = serve_set_wallpaper("zoom", "/some/path.jpg");
+        assert!(json.contains("error"));
+        assert!(json.contains("invalid fit mode"));
+    }
+
+    #[test]
+    fn serve_set_wallpaper_missing_file() {
+        let json = serve_set_wallpaper("fill", "/nonexistent/path/image.jpg");
+        assert!(json.contains("error"));
+        assert!(json.contains("file not found"));
+    }
+
+    #[test]
+    fn serve_set_wallpaper_invalid_fit_all_variants() {
+        for bad_fit in &["", "FILL", "Fit", "unknown", "scale", "crop"] {
+            let json = serve_set_wallpaper(bad_fit, "/some/path.jpg");
+            assert!(json.contains("error"), "expected error for fit mode: {}", bad_fit);
+        }
     }
 }
