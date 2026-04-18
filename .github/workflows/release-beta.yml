@@ -16,9 +16,12 @@ jobs:
         id: info
         run: |
           SHA=$(git rev-parse --short HEAD)
+          BRANCH=$(git rev-parse --abbrev-ref HEAD | sed 's/[^a-zA-Z0-9._-]/-/g')
+          TAG="beta-${BRANCH}-${SHA}"
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
-          echo "tag=beta-${SHA}" >> "$GITHUB_OUTPUT"
-          echo "Beta build for commit: ${SHA}"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Beta build for branch: ${BRANCH}, commit: ${SHA}"
 
   build:
     needs: prepare
