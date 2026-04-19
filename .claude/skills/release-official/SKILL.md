@@ -1,33 +1,29 @@
 ---
 name: release-official
-description: Trigger the official release GitHub Actions workflow
-disable-model-invocation: true
-allowed-tools: Bash(gh *) Bash(git *) Read
-argument-hint: [optional-version]
+description: Trigger the official release workflow. Shows changelog since last tag, accepts optional notes, and watches the run.
+user_invocable: true
 ---
 
 # Release Official
 
-Trigger the official release workflow (`release-official.yml`) via GitHub Actions.
+Trigger the official release workflow (`release-official.yml`).
 
 ## Steps
 
-1. **Determine version**: If `$ARGUMENTS` is provided, use it as the version. Otherwise leave it blank (the workflow will read from Cargo.toml).
+1. Run `gh run list --workflow=release-official.yml --limit=1 --json status,conclusion,databaseId` to check if there is already a release in progress. If a run is in progress, warn the user and stop.
 
-2. **Generate release notes**: Run `git log` to show changes since the last official published release:
-   ```bash
-   PREV_TAG=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')
-   git log "${PREV_TAG}..HEAD" --pretty=format:'- %h %s' --no-merges
-   ```
-   Show these to the user and ask them to provide optional release notes (or press enter to skip).
+2. Gather the release notes context:
+   - Run `git fetch --tags` to ensure tags are up to date.
+   - Find the last official release tag: `git tag --sort=-v:refname | grep -v "^release-beta-" | head -n 1`
+   - Show the user the commits since that tag: `git log --oneline <prev_tag>..HEAD`
+   - Ask the user if they want to add optional release notes, or proceed with auto-generated notes only.
 
-3. **Trigger the workflow**: Use `gh workflow run` to dispatch:
-   ```bash
-   gh workflow run release-official.yml -f version=<version> -f release_notes="<notes>"
-   ```
-   Omit `-f version=` if no version was specified (let the workflow use Cargo.toml).
+3. Trigger the workflow:
+   - If the user provided notes: `gh workflow run release-official.yml -f release_notes="<user notes>"`
+   - If no notes: `gh workflow run release-official.yml`
 
-4. **Monitor**: Show the user the link to the running workflow:
-   ```bash
-   gh run list --workflow=release-official.yml --limit 1 --json url --jq '.[0].url'
-   ```
+4. Wait a few seconds, then get the run ID: `gh run list --workflow=release-official.yml --limit=1 --json databaseId -q '.[0].databaseId'`
+
+5. Stream the workflow output: `gh run watch <run_id>` (use `run_in_background` so it doesn't block).
+
+6. Once complete, show the user the result and link to the release page.

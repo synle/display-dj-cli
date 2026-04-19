@@ -167,6 +167,24 @@ Do NOT use:
 - `https://api.github.com/repos/{owner}/{repo}/contents/{path}` (returns JSON, not raw content)
 
 
+## CI / Release Workflows
+
+Release workflows use shared composite actions from `synle/gha-workflows/actions/release/`.
+
+**release-official.yml** (workflow_dispatch only):
+- `begin-release` resolves version from `Cargo.toml` (or manual input), cleans up any existing release, creates a draft placeholder tagged `v{version}`.
+- Build matrix runs on 6 platforms: macOS ARM64/x64, Windows x64/ARM64, Linux x64/ARM64. Tests run on 3 primary platforms (macOS ARM64, Windows x64, Linux x64). Linux ARM64 cross-compiles with `gcc-aarch64-linux-gnu`.
+- Release job uses low-level `_common/notes` and `_common/finalize` actions (instead of `end-release`) because it needs to download artifacts, then append a repo-specific downloads table between notes generation and finalize.
+- On success: published release (not draft, not prerelease, marked latest). On failure: draft release with `[Error]` title suffix.
+
+**release-beta.yml** (workflow_dispatch only):
+- `begin-release` generates a `release-beta-{date}-{sha}` tag.
+- Same 6-platform build matrix as official.
+- `end-release` handles notes + finalize in one step (no downloads table needed for beta).
+- On success: draft prerelease with `[Success]` title suffix. On failure: draft with `[Error]` title suffix.
+
+**Interactive triggering:** Use `/release-official` or `/release-beta` skills to trigger workflows, view changelogs, and watch runs from Claude Code.
+
 ## Git / PR Merge Policy
 
 - Always use **squash and merge** when merging PRs. Never use merge commits or rebase merges. This keeps the git history clean with one commit per PR.
