@@ -1,4 +1,4 @@
-name: Release
+name: Release Official
 
 on:
   workflow_dispatch:
@@ -149,8 +149,8 @@ jobs:
           echo "## What's Changed" >> body.md
           echo "" >> body.md
 
-          # Find previous tag (exclude current tag if still present locally)
-          PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -1)
+          # Find previous official release tag (v* only, exclude beta tags and current tag)
+          PREV_TAG=$(git tag --sort=-v:refname | grep '^v' | grep -v "^${TAG}$" | head -1)
 
           if [ -n "$PREV_TAG" ]; then
             git log "${PREV_TAG}..HEAD" --pretty=format:'- `%h` %s' --no-merges -10 >> body.md
