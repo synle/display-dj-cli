@@ -169,7 +169,7 @@ Do NOT use:
 
 ## CI / Release Workflows
 
-Release workflows use shared composite actions from `synle/gha-workflows/actions/release/`.
+Release workflows use shared composite actions from `synle/workflows/actions/release/`.
 
 **release-official.yml** (workflow_dispatch only):
 - `begin-release` resolves version from `Cargo.toml` (or manual input), cleans up any existing release, creates a draft placeholder tagged `v{version}`.
