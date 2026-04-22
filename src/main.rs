@@ -659,9 +659,28 @@ fn maybe_keep_alive(mode: &str) {
 /// The server keeps the process alive, which is essential for gamma persistence on macOS/Windows.
 /// All routes are GET with path-based parameters. Responses are JSON with CORS headers.
 fn cmd_serve<P: Platform>(port: u16) {
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Read as _};
     use std::net::TcpListener;
     use std::time::Instant;
+
+    // Parent-death detection: monitor stdin in a background thread.
+    // When spawned as a Tauri sidecar, stdin is piped from the parent.
+    // If Tauri exits (crash, force-quit, normal exit), the pipe closes
+    // and stdin returns EOF, triggering a graceful shutdown here.
+    // This prevents orphaned sidecar processes lingering after parent death.
+    std::thread::spawn(|| {
+        let mut buf = [0u8; 1];
+        // Block until stdin is closed (EOF) — means the parent process is gone.
+        loop {
+            match std::io::stdin().read(&mut buf) {
+                Ok(0) | Err(_) => {
+                    eprintln!("stdin closed (parent exited), shutting down");
+                    std::process::exit(0);
+                }
+                Ok(_) => continue, // discard any data written to stdin
+            }
+        }
+    });
 
     let started = Instant::now();
     let addr = format!("127.0.0.1:{}", port);
