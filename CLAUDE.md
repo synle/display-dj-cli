@@ -84,6 +84,7 @@ On Windows laptops, the built-in panel often appears in **both** the WMI brightn
 - macOS scaling switches display modes (resolution-based). Windows requires logout. Linux X11/Wayland applies instantly.
 - Keep-awake uses OS-native subprocess/syscall (caffeinate, systemd-inhibit, SetThreadExecutionState) — no external deps. CLI `keep_awake_on` blocks until Ctrl+C. Server mode uses `/keep_awake/enable` and `/keep_awake/disable` for toggle control.
 - Wallpaper slideshow uses a static `Mutex<Option<SlideshowState>>` + `Arc<AtomicBool>` cancel flag + background thread. Only one slideshow active at a time — starting a new one cancels the old. Manual wallpaper changes (`/set_wallpaper`, `/set_wallpaper_one`) auto-stop any running slideshow. Timer thread sleeps in 1-second increments to check the cancel flag frequently. For `forward`/`backward` order, the folder is rescanned each tick to pick up new/deleted files. For `random`, reshuffle happens after a full cycle.
+- **Parent-death detection** (server mode only): When `cmd_serve()` starts, a background thread reads from stdin in a loop. When spawned as a Tauri sidecar, stdin is piped from the parent process. If the parent exits (crash, force-quit, normal shutdown), the OS closes the pipe and stdin returns EOF, causing the sidecar to shut itself down gracefully via `process::exit(0)`. This prevents orphaned sidecar processes. When run standalone from a terminal, stdin is connected to the TTY and won't EOF, so standalone usage is unaffected.
 
 ## CLI
 

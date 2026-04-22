@@ -124,6 +124,8 @@ display-dj serve                        # start HTTP server on port 51337
 
 `display-dj serve` starts a lightweight HTTP server on `127.0.0.1` (localhost only, not exposed to the network). The server keeps the process alive, so gamma changes persist on macOS.
 
+When spawned as a sidecar (e.g., by Tauri with stdin piped), the server monitors stdin for EOF. If the parent process exits (crash, force-quit, or normal shutdown), stdin closes and the server shuts down automatically — preventing orphaned processes.
+
 ```bash
 display-dj serve          # default port 51337
 display-dj serve 8080     # custom port

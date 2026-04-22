@@ -506,7 +506,9 @@ If you need gamma persistence on macOS (the sidecar process exits after each cal
 use tauri_plugin_shell::ShellExt;
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    // Start display-dj HTTP server as background sidecar
+    // Start display-dj HTTP server as background sidecar.
+    // Tauri's shell plugin pipes stdin automatically. When this app exits
+    // (even via crash/force-quit), stdin closes and the sidecar shuts down.
     let (mut _rx, _child) = app.shell()
         .sidecar("display-dj").unwrap()
         .args(["serve"])
@@ -515,6 +517,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+> **Note:** The sidecar monitors stdin for EOF. When the parent process exits, stdin closes and the server shuts down automatically — no explicit kill needed for crash recovery.
 
 Then call via HTTP from the frontend directly (no Rust invoke needed):
 

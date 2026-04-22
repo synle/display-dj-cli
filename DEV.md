@@ -185,6 +185,7 @@ This means `display-dj get_all 2>/dev/null | jq` always works.
 
 - **DDC brightness 0 = standby** — setting DDC brightness to 0 can freeze monitors. Clamped to minimum 1 on all platforms.
 - **Gamma persistence** — macOS/Windows reset gamma on process exit. Linux (xrandr/wlr-randr) persists. This is why `maybe_keep_alive()` blocks the process in `force`/`gamma` modes.
+- **Parent-death detection** — In server mode (`cmd_serve`), a background thread reads from stdin. When the parent process exits (closing the pipe), stdin returns EOF and the server shuts down via `process::exit(0)`. This prevents orphaned sidecar processes when the parent crashes or is force-quit.
 - **DDC checksum errors** — some monitors (e.g., Acer XZ322QU V3) return checksum errors on reads and silently ignore writes. The `force` mode stacks DDC + gamma as a reliable fallback.
 - **Gamma + low DDC backlight** — minimal visible change because the effects multiply.
 - **Scale clamping** — 75%-300% on all platforms to prevent unusable UI.
