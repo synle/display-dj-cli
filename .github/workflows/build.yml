@@ -80,3 +80,101 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}*
           retention-days: 90
+
+  # ---- Rust Code Coverage ----
+  # Runs `cargo llvm-cov` and enforces the coverage baselines captured when
+  # this job was introduced. Coverage that regresses below the baselines fails
+  # the build. Bump the MIN_* values when coverage genuinely improves.
+  rust_coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Run Rust unit tests with coverage
+        id: rust_tests
+        run: |
+          # Run tests once, then emit both JSON (for threshold enforcement) and
+          # LCOV (for the uploaded artifact) from the same profdata.
+          cargo llvm-cov --no-report
+          cargo llvm-cov report --json --summary-only --output-path rust-coverage.json
+          cargo llvm-cov report --lcov --output-path rust-coverage.lcov
+          cargo llvm-cov report --summary-only
+
+      - name: Upload Rust coverage artifacts
+        if: ${{ always() && steps.rust_tests.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-coverage
+          path: |
+            rust-coverage.json
+            rust-coverage.lcov
+          retention-days: 14
+
+      # Posts a consolidated Rust coverage table to the GitHub Actions job
+      # summary AND enforces baselines.
+      - name: Report and enforce Rust coverage
+        id: rust_coverage
+        if: ${{ always() && steps.rust_tests.outcome != 'skipped' }}
+        shell: bash
+        env:
+          MIN_LINES: "37"
+          MIN_REGIONS: "39"
+          MIN_FUNCTIONS: "43"
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## :bar_chart: Rust Code Coverage" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ ! -f rust-coverage.json ]; then
+            echo ":warning: \`rust-coverage.json\` not produced — cannot report or enforce thresholds." >> $GITHUB_STEP_SUMMARY
+            echo "::error::rust-coverage.json missing"
+            exit 1
+          fi
+
+          LINES=$(python3 -c "import json; print(int(json.load(open('rust-coverage.json'))['data'][0]['totals']['lines']['percent']))")
+          REGIONS=$(python3 -c "import json; print(int(json.load(open('rust-coverage.json'))['data'][0]['totals']['regions']['percent']))")
+          FUNCS=$(python3 -c "import json; print(int(json.load(open('rust-coverage.json'))['data'][0]['totals']['functions']['percent']))")
+
+          fail=0
+          row() {
+            local name=$1 definition=$2 actual=$3 min=$4
+            local status
+            if awk -v a="$actual" -v m="$min" 'BEGIN { exit (a + 0 < m + 0) ? 0 : 1 }'; then
+              status=":x: FAIL"
+              echo "::error::${name} coverage ${actual}% is below baseline ${min}%"
+              fail=1
+            else
+              status=":white_check_mark: pass"
+            fi
+            echo "| ${name} | ${definition} | ${min}% | ${actual}% | ${status} |" >> $GITHUB_STEP_SUMMARY
+          }
+
+          echo "| Metric | Definition | Baseline (min) | Actual | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|------------|----------------|--------|--------|" >> $GITHUB_STEP_SUMMARY
+          row "Lines"     "% of source lines executed at least once"                                "$LINES"   "$MIN_LINES"
+          row "Regions"   "% of llvm-cov regions (finer-grained than lines: per-branch arc) covered" "$REGIONS" "$MIN_REGIONS"
+          row "Functions" "% of declared functions invoked at least once"                            "$FUNCS"   "$MIN_FUNCTIONS"
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Scope: \`src/**/*.rs\`. Provider: \`cargo-llvm-cov\` (LLVM source-based coverage). Baselines are measured on Linux; code gated by \`#[cfg(target_os = \"macos\"|\"windows\")]\` is not compiled in this profile and therefore not measured. Source of truth: \`rust-coverage.json\` (uploaded as \`rust-coverage\` artifact)." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "$fail" -ne 0 ]; then
+            echo ":x: **Rust coverage regressed below baseline — see annotations above.** To raise the floor, edit \`MIN_*\` in \`.github/workflows/build.yml\`." >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo ":white_check_mark: **All Rust coverage metrics meet or exceed baseline.**" >> $GITHUB_STEP_SUMMARY
+          fi
