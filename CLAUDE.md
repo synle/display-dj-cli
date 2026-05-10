@@ -186,6 +186,10 @@ Release workflows use shared composite actions from `synle/workflows/actions/rel
 
 **Interactive triggering:** Use `/release-official` or `/release-beta` skills to trigger workflows, view changelogs, and watch runs from Claude Code.
 
+## Code Coverage
+
+`build.yml` includes a `rust_coverage` job that runs `cargo llvm-cov` on Linux and enforces integer-percent baselines via `MIN_LINES` / `MIN_REGIONS` / `MIN_FUNCTIONS` env vars in that job. Coverage regressions below baseline fail the build. Raw `rust-coverage.json` + `rust-coverage.lcov` are uploaded as the `rust-coverage` artifact (14-day retention). Bump the `MIN_*` values when coverage genuinely improves. Note: only the Linux-compiled code paths (i.e. `linux.rs` + non-`#[cfg(target_os = "macos"|"windows")]` parts of `main.rs`) are measured.
+
 ## Git / PR Merge Policy
 
 - Always use **squash and merge** when merging PRs. Never use merge commits or rebase merges. This keeps the git history clean with one commit per PR.
