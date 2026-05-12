@@ -132,9 +132,9 @@ jobs:
         if: ${{ always() && steps.rust_tests.outcome != 'skipped' }}
         shell: bash
         env:
-          MIN_LINES: "37"
-          MIN_REGIONS: "39"
-          MIN_FUNCTIONS: "43"
+          MIN_LINES: "60"
+          MIN_REGIONS: "60"
+          MIN_FUNCTIONS: "60"
         run: |
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## :bar_chart: Rust Code Coverage" >> $GITHUB_STEP_SUMMARY
