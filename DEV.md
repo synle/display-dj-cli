@@ -46,7 +46,7 @@ display-dj-cli/
 │   └── workflows/
 │       ├── build.yml   # CI: builds 6 targets (macOS/Windows/Linux x arm64/x64)
 │       └── release.yml # Release workflow
-├── CLAUDE.md           # AI assistant context (architecture deep-dive)
+├── AGENTS           # AI assistant context (architecture deep-dive)
 ├── CONTRIBUTING.md     # Contributor guide with Rust syntax reference
 └── README.md           # User-facing docs
 ```
@@ -155,7 +155,7 @@ cargo test
 | Keep-awake | `SetThreadExecutionState` Win32 API (ES_CONTINUOUS + ES_SYSTEM_REQUIRED + ES_DISPLAY_REQUIRED) |
 | Wallpaper | Registry (`WallpaperStyle` + `TileWallpaper`) + `SystemParametersInfoW` via PowerShell |
 
-**Builtin dedup:** On laptops, the built-in panel appears in both WMI and DDC enumeration. The enumerate code checks `MONITORINFOF_PRIMARY` via `GetMonitorInfoW` and skips the primary HMONITOR from DDC when a WMI builtin was already detected. See CLAUDE.md for full details.
+**Builtin dedup:** On laptops, the built-in panel appears in both WMI and DDC enumeration. The enumerate code checks `MONITORINFOF_PRIMARY` via `GetMonitorInfoW` and skips the primary HMONITOR from DDC when a WMI builtin was already detected. See AGENTS for full details.
 
 **PnP enrichment:** External monitors with the same generic name get disambiguated with PnP device IDs from `EnumDisplayDevicesW` (e.g., `"Generic PnP Monitor (DEL40F4)"`).
 
